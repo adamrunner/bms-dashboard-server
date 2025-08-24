@@ -4,6 +4,7 @@ BMS Dashboard Web Server
 Flask application with WebSocket support for real-time telemetry display
 """
 
+import sys
 import threading
 import time
 from flask import Flask, render_template, jsonify, request
@@ -293,7 +294,11 @@ def initialize_monitoring():
 
 
 if __name__ == '__main__':
-    print("Starting BMS Dashboard Server...")
+    # Check for debug flag
+    debug_mode = '--debug' in sys.argv
+    
+    mode = "DEBUG" if debug_mode else "PRODUCTION"
+    print(f"Starting BMS Dashboard Server in {mode} mode...")
     print("Dashboard will be available at: http://0.0.0.0:5000")
     
     # Initialize monitoring
@@ -305,8 +310,8 @@ if __name__ == '__main__':
             app,
             host='0.0.0.0',
             port=5000,
-            debug=False,  # Set to True for development
-            use_reloader=False  # Disable reloader to prevent thread issues
+            debug=debug_mode,  # Set to True for development
+            use_reloader=debug_mode  # Enable reloader for template reloading in debug mode
         )
     except KeyboardInterrupt:
         print("\nShutting down dashboard server...")

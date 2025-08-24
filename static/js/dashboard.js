@@ -3,6 +3,36 @@ let socket;
 let charts = {};
 let currentTimeRange = 0.017; // hours (1 minute default)
 
+// Helper function to trigger glow effect on connection status badge
+function triggerGlowEffect() {
+    const statusElement = document.getElementById('connectionStatus');
+    // Remove any existing glow classes
+    statusElement.classList.remove('glow-pulse', 'glow-flash');
+    // Force a reflow to reset the CSS animation (required for the animation to replay)
+    void statusElement.offsetWidth;
+    // Add flash effect
+    statusElement.classList.add('glow-flash');
+    // Remove class after animation completes
+    setTimeout(() => {
+        statusElement.classList.remove('glow-flash');
+    }, 500);
+}
+
+// Helper function to trigger pulse effect (for connected state)
+function triggerPulseEffect() {
+    const statusElement = document.getElementById('connectionStatus');
+    // Remove any existing glow classes
+    statusElement.classList.remove('glow-pulse', 'glow-flash');
+    // Trigger reflow to reset animation
+    void statusElement.offsetWidth;
+    // Add pulse effect
+    statusElement.classList.add('glow-pulse');
+    // Remove class after animation completes
+    setTimeout(() => {
+        statusElement.classList.remove('glow-pulse');
+    }, 1500);
+}
+
 // Chart configurations
 const chartConfig = {
     type: 'line',
@@ -263,18 +293,24 @@ function connectWebSocket() {
         document.getElementById('connectionStatus').textContent = 'Connected';
         document.getElementById('connectionStatus').className = 'badge status-connected';
         console.log('WebSocket connected successfully!', socket.id);
+
+        triggerPulseEffect();
     });
     
     socket.on('disconnect', function() {
         document.getElementById('connectionStatus').textContent = 'Disconnected';
         document.getElementById('connectionStatus').className = 'badge status-disconnected';
         console.log('WebSocket disconnected');
+
+        triggerGlowEffect();
     });
     
     socket.on('telemetry_update', function(data) {
         console.log('Received telemetry update:', data);
         updateChartsWithNewData(data);
         updateCurrentValues(data);
+        
+        triggerGlowEffect();
     });
     
     socket.on('initial_data', function(data) {
@@ -294,16 +330,6 @@ function connectWebSocket() {
     socket.on('error', function(error) {
         console.error('WebSocket error:', error);
     });
-    
-    socket.on('test_response', function(data) {
-        console.log('Received test response from server:', data);
-    });
-    
-    // Test the connection by requesting a ping
-    socket.on('connect', function() {
-        console.log('Sending test message to server...');
-        socket.emit('test_message', {message: 'Hello from client'});
-    });
 }
 
 // Load initial data
@@ -320,7 +346,6 @@ function loadInitialData() {
     loadStatistics();
 }
 
-// Update charts with historical data
 function updateChartsWithHistoricalData(data) {
     if (!data || data.length === 0) return;
     
@@ -405,13 +430,9 @@ function updateChartsWithHistoricalData(data) {
 function updateChartsWithNewData(data) {
     const timestamp = new Date(data.timestamp * 1000);
     
-    // Dynamic max data points based on time range
-    let maxDataPoints;
-    if (currentTimeRange <= 0.5) { // 30 minutes or less
-        maxDataPoints = Math.min(1800, currentTimeRange * 3600); // Up to 1800 points for 30 min
-    } else {
-        maxDataPoints = 1000; // Standard limit for longer ranges
-    }
+    // Calculate the time window based on current selection
+    const now = new Date();
+    const timeWindowStart = new Date(now.getTime() - (currentTimeRange * 3600 * 1000));
     
     // Add new data points
     charts.pack.data.datasets[0].data.push({x: timestamp, y: data.pack_voltage_v});
@@ -430,12 +451,11 @@ function updateChartsWithNewData(data) {
     
     charts.power.data.datasets[0].data.push({x: timestamp, y: data.power_w});
     
-    // Remove old data points to keep performance good
+    // Filter data to maintain the selected time window
     Object.values(charts).forEach(chart => {
         chart.data.datasets.forEach(dataset => {
-            if (dataset.data.length > maxDataPoints) {
-                dataset.data.shift();
-            }
+            // Remove data points outside the time window
+            dataset.data = dataset.data.filter(point => point.x >= timeWindowStart);
         });
     });
     

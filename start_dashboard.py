@@ -56,6 +56,9 @@ def check_dependencies():
     return True
 
 def main():
+    # Check for debug mode flag
+    debug_mode = '--debug' in sys.argv
+    
     print("🔋 BMS Dashboard Startup Check")
     print("=" * 40)
     
@@ -70,14 +73,27 @@ def main():
         if response != 'y':
             sys.exit(1)
     
-    print("\n🚀 Starting BMS Dashboard Server...")
+    # Set debug mode message
+    mode = "DEBUG" if debug_mode else "PRODUCTION"
+    print(f"\n🚀 Starting BMS Dashboard Server in {mode} mode...")
     print("   Dashboard URL: http://0.0.0.0:5000")
+    if debug_mode:
+        print("   Template auto-reload enabled")
     print("   Press Ctrl+C to stop")
     print("-" * 40)
     
     try:
-        # Start the dashboard server
-        subprocess.run([sys.executable, 'dashboard_server.py'])
+        # Start the dashboard server with appropriate flags
+        cmd = [sys.executable, 'dashboard_server.py']
+        if debug_mode:
+            cmd.append('--debug')
+        subprocess.run(cmd)
+    except FileNotFoundError:
+        # Fallback to python3 if sys.executable is not found
+        cmd = ['python3', 'dashboard_server.py']
+        if debug_mode:
+            cmd.append('--debug')
+        subprocess.run(cmd)
     except KeyboardInterrupt:
         print("\n👋 Dashboard stopped")
     except Exception as e:

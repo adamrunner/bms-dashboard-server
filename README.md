@@ -118,6 +118,23 @@ docker-compose build
 docker-compose down -v && docker-compose up -d
 ```
 
+### Development Mode
+
+For local development with auto-reloading of templates and code changes:
+
+```bash
+# Start dashboard in debug mode (auto-reload enabled)
+./start_dashboard_debug.sh
+
+# Or manually pass the debug flag
+python start_dashboard.py --debug
+```
+
+When running in debug mode:
+- Templates in `templates/` will auto-reload when changed
+- Code changes will trigger server restart
+- Debug logging is enabled
+
 ### Database Operations
 
 ```bash
