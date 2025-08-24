@@ -1,0 +1,213 @@
+# BMS Telemetry System - Docker Deployment
+
+This guide explains how to deploy the BMS (Battery Management System) telemetry services using Docker.
+
+## Architecture
+
+The system consists of three containerized services:
+
+- **Mosquitto MQTT Broker**: Eclipse Mosquitto MQTT broker for message handling
+- **BMS MQTT Logger**: Subscribes to MQTT telemetry data and stores it in SQLite database
+- **BMS Dashboard**: Flask web application providing real-time telemetry visualization
+
+## Prerequisites
+
+- Docker Engine 20.10+
+- Docker Compose v2.0+
+- No external dependencies (includes MQTT broker)
+
+## Quick Start
+
+1. **Clone and navigate to the project directory**
+   ```bash
+   cd /path/to/bms-telemetry
+   ```
+
+2. **Configure environment variables**
+   ```bash
+   cp .env.example .env
+   # Edit .env file with your MQTT broker settings
+   ```
+
+3. **Start the services**
+   ```bash
+   docker-compose up -d
+   ```
+
+4. **Access the dashboard**
+   - Open http://localhost:5000 in your browser
+   - Real-time telemetry data will appear as MQTT messages arrive
+
+## Configuration
+
+### Environment Variables
+
+Create a `.env` file based on `.env.example`:
+
+```bash
+# MQTT Broker Configuration
+MQTT_BROKER=mosquitto          # Use internal broker
+MQTT_PORT=1883
+MQTT_USERNAME=admin
+MQTT_PASSWORD=password1234
+MQTT_TOPIC=bms/telemetry
+
+# Mosquitto Service Configuration
+MQTT_EXTERNAL_PORT=1883        # External port for MQTT
+MQTT_WEBSOCKET_PORT=9001       # WebSocket port
+
+# Dashboard Configuration
+DASHBOARD_PORT=5000
+FLASK_DEBUG=false
+```
+
+### Using External MQTT Broker
+
+To connect to an external MQTT broker instead of the internal Mosquitto service:
+
+```bash
+# In your .env file
+MQTT_BROKER=anton.local          # External broker hostname
+MQTT_PORT=1883
+MQTT_USERNAME=your-username
+MQTT_PASSWORD=your-password
+```
+
+Then comment out or remove the `mosquitto` service from `docker-compose.yml`.
+
+### Mosquitto Configuration
+
+The internal Mosquitto broker includes:
+- MQTT on port 1883
+- WebSocket support on port 9001
+- Authentication required (username/password)
+- Persistent message storage
+
+To change the default admin password:
+```bash
+./mosquitto/config/create_users.sh
+```
+
+## Docker Commands
+
+### Start Services
+```bash
+# Start in background
+docker-compose up -d
+
+# Start with logs visible
+docker-compose up
+```
+
+### View Logs
+```bash
+# View all logs
+docker-compose logs
+
+# View specific service logs
+docker-compose logs mosquitto
+docker-compose logs bms-logger
+docker-compose logs bms-dashboard
+
+# Follow logs in real-time
+docker-compose logs -f
+```
+
+### Stop Services
+```bash
+# Stop services (keeps data)
+docker-compose down
+
+# Stop and remove volumes (deletes data)
+docker-compose down -v
+```
+
+### Service Management
+```bash
+# Restart specific service
+docker-compose restart bms-logger
+
+# Check service status
+docker-compose ps
+
+# View resource usage
+docker stats
+```
+
+## Data Persistence
+
+- SQLite database is stored in Docker volume `bms_data`
+- Data persists across container restarts
+- To backup database: `docker cp bms-dashboard:/app/data/bms_telemetry.db ./backup.db`
+
+## Health Monitoring
+
+Both services include health checks:
+
+```bash
+# Check health status
+docker-compose ps
+
+# View health check details
+docker inspect bms-dashboard --format='{{.State.Health}}'
+```
+
+## Troubleshooting
+
+### MQTT Connection Issues
+1. Check Mosquitto service status: `docker-compose ps mosquitto`
+2. View Mosquitto logs: `docker-compose logs mosquitto`
+3. Test MQTT connection: `docker exec mosquitto-broker mosquitto_pub -h localhost -t test -m "hello" -u admin -P password1234`
+4. Verify credentials in `.env` file
+5. For external broker: Check network connectivity: `docker exec bms-mqtt-logger ping your-broker-host`
+
+### Dashboard Not Loading
+1. Check if port 5000 is available: `netstat -tulpn | grep 5000`
+2. Verify dashboard service is running: `docker-compose ps`
+3. Check logs: `docker-compose logs bms-dashboard`
+
+### Database Issues
+1. Check database file permissions
+2. Verify SQLite database creation: `docker exec bms-dashboard ls -la /app/data/`
+3. Reset database: `docker-compose down -v && docker-compose up -d`
+
+## Development
+
+### Building Images Locally
+```bash
+# Build specific service
+docker-compose build bms-logger
+
+# Build all services
+docker-compose build
+
+# Build without cache
+docker-compose build --no-cache
+```
+
+### Accessing Container Shell
+```bash
+# Access dashboard container
+docker exec -it bms-dashboard /bin/bash
+
+# Access logger container
+docker exec -it bms-mqtt-logger /bin/bash
+```
+
+## Security Notes
+
+- Services run as non-root user inside containers
+- Sensitive data (passwords) should be managed via Docker secrets in production
+- Consider using Docker networks to isolate services
+- Regular security updates of base images recommended
+
+## Production Deployment
+
+For production deployments:
+
+1. Use Docker secrets for sensitive configuration
+2. Implement proper logging aggregation
+3. Set up monitoring and alerting
+4. Use reverse proxy (nginx) for HTTPS termination
+5. Configure resource limits in docker-compose.yml
+6. Implement backup strategy for database volume

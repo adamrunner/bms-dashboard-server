@@ -1,0 +1,101 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:latest
+    container_name: mosquitto-broker
+    restart: unless-stopped
+    ports:
+      - "${MQTT_EXTERNAL_PORT:-1883}:1883"
+      - "${MQTT_WEBSOCKET_PORT:-9001}:9001"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
+    networks:
+      - bms_network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mosquitto_pub",
+          "-h",
+          "localhost",
+          "-t",
+          "test",
+          "-m",
+          "health_check",
+          "-u",
+          "admin",
+          "-P",
+          "password1234",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  bms-logger:
+    build:
+      context: .
+      dockerfile: Dockerfile.logger
+    container_name: bms-mqtt-logger
+    restart: unless-stopped
+    environment:
+      - MQTT_BROKER=${MQTT_BROKER:-mosquitto}
+      - MQTT_PORT=${MQTT_PORT:-1883}
+      - MQTT_USERNAME=${MQTT_USERNAME:-admin}
+      - MQTT_PASSWORD=${MQTT_PASSWORD:-password1234}
+      - MQTT_TOPIC=${MQTT_TOPIC:-bms/telemetry}
+      - DATABASE_PATH=/app/data/bms_telemetry.db
+    volumes:
+      - .:/app/data
+    networks:
+      - bms_network
+    depends_on:
+      - bms-dashboard
+      - mosquitto
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sqlite3; conn = sqlite3.connect('/app/data/bms_telemetry.db'); conn.execute('SELECT 1'); conn.close()",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  bms-dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: bms-dashboard
+    restart: unless-stopped
+    environment:
+      - DATABASE_PATH=/app/data/bms_telemetry.db
+      - FLASK_HOST=0.0.0.0
+      - FLASK_PORT=5000
+      - FLASK_DEBUG=${FLASK_DEBUG:-false}
+    ports:
+      - "${DASHBOARD_PORT:-5000}:5000"
+    volumes:
+      - .:/app/data
+    networks:
+      - bms_network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import requests; requests.get('http://localhost:5000/api/health', timeout=5)",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+
+networks:
+  bms_network:
+    driver: bridge

@@ -1,0 +1,40 @@
+FROM python:3.11-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    sqlite3 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Copy requirements and install Python dependencies
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy application files
+COPY bms_mqtt_logger.py .
+COPY bms_schema.sql .
+COPY database_queries.py .
+
+# Create data directory for database and ensure proper permissions
+RUN mkdir -p /app/data && chmod 755 /app/data
+
+# Set environment variables with defaults
+ENV MQTT_BROKER=anton.local
+ENV MQTT_PORT=1883
+ENV MQTT_USERNAME=admin
+ENV MQTT_PASSWORD=password1234
+ENV MQTT_TOPIC=bms/telemetry
+ENV DATABASE_PATH=/app/data/bms_telemetry.db
+
+# Create non-root user for security
+RUN groupadd -r bms && useradd -r -g bms bms
+RUN chown -R bms:bms /app
+USER bms
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD python -c "import sqlite3; conn = sqlite3.connect('${DATABASE_PATH}'); conn.execute('SELECT 1'); conn.close()" || exit 1
+
+# Run the MQTT logger
+CMD ["python", "bms_mqtt_logger.py"]
