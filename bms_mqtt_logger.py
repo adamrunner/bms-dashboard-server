@@ -18,12 +18,12 @@ MQTT_BROKER = os.getenv("MQTT_BROKER", "anton.local")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USERNAME = os.getenv("MQTT_USERNAME", "admin")
 MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "password1234")
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry/bms-404CCAFFFE43")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
 
 # Expected CSV columns
 EXPECTED_COLUMNS = [
-    'timestamp', 'elapsed_seconds', 'elapsed_hms', 'total_energy_wh',
+    'bms_id', 'timestamp', 'elapsed_seconds', 'elapsed_hms', 'total_energy_wh',
     'pack_voltage_v', 'pack_current_a', 'state_of_charge_pct', 'power_w',
     'full_capacity_ah', 'peak_current_a', 'peak_power_w', 'cell_count',
     'min_cell_voltage_v', 'min_cell_num', 'max_cell_voltage_v', 'max_cell_num',
@@ -97,7 +97,7 @@ def convert_value(value, column_name):
             return None
     
     # String columns
-    if column_name in ['elapsed_hms']:
+    if column_name in ['bms_id', 'elapsed_hms']:
         return value
     
     # Float columns (everything else)

@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS bms_telemetry (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    bms_id TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
     elapsed_seconds REAL,
     elapsed_hms TEXT,
@@ -32,5 +33,6 @@ CREATE TABLE IF NOT EXISTS bms_telemetry (
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE INDEX IF NOT EXISTS idx_bms_id ON bms_telemetry(bms_id);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON bms_telemetry(timestamp);
 CREATE INDEX IF NOT EXISTS idx_created_at ON bms_telemetry(created_at);
