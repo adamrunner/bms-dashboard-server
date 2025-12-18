@@ -12,7 +12,7 @@ from flask_socketio import SocketIO, emit
 import sqlite3
 from database_queries import (
     get_telemetry_data, get_latest_reading, get_statistics,
-    get_recent_data_for_websocket, get_data_count
+    get_recent_data_for_websocket, get_data_count, get_available_bms_ids
 )
 
 app = Flask(__name__)
@@ -93,10 +93,11 @@ def dashboard():
 def api_data():
     """API endpoint to get telemetry data"""
     hours = request.args.get('hours', default=1, type=float)
+    bms_id = request.args.get('bms_id', default=None, type=str)
     
     try:
-        print(f"API: Fetching data for {hours} hours")
-        data = get_telemetry_data(hours)
+        print(f"API: Fetching data for {hours} hours, BMS ID: {bms_id}")
+        data = get_telemetry_data(hours, bms_id)
         print(f"API: Returning {len(data)} records")
         return jsonify(data)
     except Exception as e:
@@ -107,8 +108,9 @@ def api_data():
 @app.route('/api/latest')
 def api_latest():
     """API endpoint to get latest reading"""
+    bms_id = request.args.get('bms_id', default=None, type=str)
     try:
-        data = get_latest_reading()
+        data = get_latest_reading(bms_id)
         return jsonify(data if data else {})
     except Exception as e:
         print(f"Error fetching latest data: {e}")
@@ -119,27 +121,41 @@ def api_latest():
 def api_statistics():
     """API endpoint to get statistics"""
     hours = request.args.get('hours', default=24, type=int)
+    bms_id = request.args.get('bms_id', default=None, type=str)
     
     try:
-        stats = get_statistics(hours)
+        stats = get_statistics(hours, bms_id)
         return jsonify(stats)
     except Exception as e:
         print(f"Error fetching statistics: {e}")
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/bms-ids')
+def api_bms_ids():
+    """API endpoint to get available BMS IDs"""
+    try:
+        bms_ids = get_available_bms_ids()
+        return jsonify(bms_ids)
+    except Exception as e:
+        print(f"Error fetching BMS IDs: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/health')
 def api_health():
     """Health check endpoint"""
+    bms_id = request.args.get('bms_id', default=None, type=str)
     try:
-        count = get_data_count()
-        latest = get_latest_reading()
+        count = get_data_count(bms_id)
+        latest = get_latest_reading(bms_id)
         
         return jsonify({
             'status': 'healthy',
             'total_records': count,
             'latest_timestamp': latest['timestamp'] if latest else None,
-            'monitoring_active': monitoring_active
+            'monitoring_active': monitoring_active,
+            'bms_id': bms_id
         })
     except Exception as e:
         return jsonify({

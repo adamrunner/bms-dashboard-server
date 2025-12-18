@@ -2,6 +2,7 @@
 let socket;
 let charts = {};
 let currentTimeRange = 0.017; // hours (1 minute default)
+let currentBmsId = ''; // current BMS ID filter
 
 // Helper function to trigger glow effect on connection status badge
 function triggerGlowEffect() {
@@ -85,6 +86,7 @@ const chartConfig = {
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
     initializeCharts();
+    loadBmsIds();
     connectWebSocket();
     loadInitialData();
     
@@ -332,10 +334,42 @@ function connectWebSocket() {
     });
 }
 
+// Load available BMS IDs
+function loadBmsIds() {
+    fetch('/api/bms-ids')
+        .then(response => response.json())
+        .then(bmsIds => {
+            const select = document.getElementById('bmsIdSelect');
+            select.innerHTML = '';
+            
+            if (bmsIds.length > 0) {
+                // Set the first BMS ID as default
+                currentBmsId = bmsIds[0];
+                
+                bmsIds.forEach(bmsId => {
+                    const option = document.createElement('option');
+                    option.value = bmsId;
+                    option.textContent = bmsId;
+                    if (bmsId === currentBmsId) {
+                        option.selected = true;
+                    }
+                    select.appendChild(option);
+                });
+            }
+        })
+        .catch(error => console.error('Error loading BMS IDs:', error));
+}
+
 // Load initial data
 function loadInitialData() {
-    console.log('Loading data for time range:', currentTimeRange, 'hours');
-    fetch('/api/data?hours=' + currentTimeRange)
+    console.log('Loading data for time range:', currentTimeRange, 'hours, BMS ID:', currentBmsId);
+    
+    let url = '/api/data?hours=' + currentTimeRange;
+    if (currentBmsId) {
+        url += '&bms_id=' + encodeURIComponent(currentBmsId);
+    }
+    
+    fetch(url)
         .then(response => response.json())
         .then(data => {
             console.log('Received', data.length, 'records for', currentTimeRange, 'hours');
@@ -479,7 +513,12 @@ function updateCurrentValues(data) {
 
 // Load and display statistics
 function loadStatistics() {
-    fetch('/api/statistics')
+    let url = '/api/statistics';
+    if (currentBmsId) {
+        url += '?bms_id=' + encodeURIComponent(currentBmsId);
+    }
+    
+    fetch(url)
         .then(response => response.json())
         .then(stats => updateStatistics(stats))
         .catch(error => console.error('Error loading statistics:', error));
@@ -539,6 +578,17 @@ function setTimeRange(hours) {
     event.target.classList.add('active');
     
     // Reload data
+    loadInitialData();
+}
+
+// Handle BMS ID selection change
+function onBmsIdChange() {
+    const select = document.getElementById('bmsIdSelect');
+    currentBmsId = select.value;
+    
+    console.log('BMS ID changed to:', currentBmsId);
+    
+    // Reload all data with new BMS ID filter
     loadInitialData();
 }
 

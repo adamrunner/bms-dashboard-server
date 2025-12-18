@@ -39,7 +39,19 @@
     <div class="container-fluid mt-4">
         <!-- Controls -->
         <div class="row mb-4">
-            <div class="col-md-6">
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-body">
+                        <h5 class="card-title">BMS Selection</h5>
+                        <div class="form-group">
+                            <label for="bmsIdSelect" class="form-label">Select BMS:</label>
+                            <select class="form-select" id="bmsIdSelect" onchange="onBmsIdChange()">
+                            </select>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
                 <div class="card">
                     <div class="card-body">
                         <h5 class="card-title">Time Range</h5>
@@ -54,7 +66,7 @@
                     </div>
                 </div>
             </div>
-            <div class="col-md-6">
+            <div class="col-md-4">
                 <div class="card">
                     <div class="card-body">
                         <h5 class="card-title">Auto Refresh</h5>
