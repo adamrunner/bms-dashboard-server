@@ -97,16 +97,39 @@ document.addEventListener('DOMContentLoaded', function() {
     });
 });
 
-function setLoadingState(isLoading, message = 'Loading telemetry data...') {
-    const loadingOverlay = document.getElementById('chartLoadingOverlay');
-    const loadingText = document.getElementById('loadingText');
+function setLoadingState(isLoading, message = 'Loading telemetry data...', sourceModule = 'time') {
+    const moduleMap = {
+        bms: 'bmsModuleCard',
+        time: 'timeRangeModuleCard',
+        refresh: 'refreshModuleCard'
+    };
     const controls = document.querySelectorAll('.time-range-btn, #bmsIdSelect, #resolutionSelect');
-
-    loadingOverlay.classList.toggle('show', isLoading);
-    loadingText.textContent = message;
     controls.forEach(control => {
         control.disabled = isLoading;
     });
+
+    document.querySelectorAll('.module-loading-overlay').forEach(overlay => {
+        overlay.classList.remove('show');
+    });
+
+    if (!isLoading) {
+        return;
+    }
+
+    const cardId = moduleMap[sourceModule] || moduleMap.time;
+    const moduleCard = document.getElementById(cardId);
+    if (!moduleCard) {
+        return;
+    }
+
+    const overlay = moduleCard.querySelector('.module-loading-overlay');
+    const overlayText = moduleCard.querySelector('.module-loading-text');
+    if (overlayText) {
+        overlayText.textContent = message;
+    }
+    if (overlay) {
+        overlay.classList.add('show');
+    }
 }
 
 function updateResolutionAndPointInfo(meta = {}) {
@@ -439,18 +462,18 @@ function loadBmsIds() {
                 });
             }
 
-            loadInitialData();
+            loadInitialData('bms');
             sendViewSubscription();
         })
         .catch(error => {
             console.error('Error loading BMS IDs:', error);
             setFetchStatus('BMS list fetch failed', error.name === 'AbortError' ? 'warning' : 'error');
-            loadInitialData();
+            loadInitialData('time');
         });
 }
 
 // Load initial data
-function loadInitialData() {
+function loadInitialData(sourceModule = 'time') {
     const requestId = ++latestDataRequestId;
 
     if (activeDataRequestController) {
@@ -458,7 +481,7 @@ function loadInitialData() {
     }
 
     activeDataRequestController = new AbortController();
-    setLoadingState(true);
+    setLoadingState(true, 'Loading telemetry data...', sourceModule);
 
     fetchJsonWithTimeout(
         getDataRequestUrl(),
@@ -680,19 +703,19 @@ function setTimeRange(hours, button) {
         button.classList.add('active');
     }
 
-    loadInitialData();
+    loadInitialData('time');
 }
 
 function onBmsIdChange() {
     const select = document.getElementById('bmsIdSelect');
     currentBmsId = select.value;
-    loadInitialData();
+    loadInitialData('bms');
 }
 
 function onResolutionChange() {
     const select = document.getElementById('resolutionSelect');
     currentResolution = select.value;
-    loadInitialData();
+    loadInitialData('refresh');
 }
 
 function formatTimestamp(timestamp) {
