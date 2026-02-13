@@ -5,14 +5,12 @@ Flask application with WebSocket support for real-time telemetry display
 """
 
 import sys
-import threading
 import time
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
-import sqlite3
 from database_queries import (
-    get_telemetry_data, get_latest_reading, get_statistics,
-    get_recent_data_for_websocket, get_data_count, get_available_bms_ids
+    get_latest_reading, get_statistics, get_data_count, get_available_bms_ids,
+    get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds
 )
 
 app = Flask(__name__)
@@ -24,7 +22,45 @@ last_data_count = 0
 monitoring_thread = None
 monitoring_active = False
 connected_clients = set()
+client_view_config = {}
 last_stats_update = 0
+
+DEFAULT_VIEW_CONFIG = {
+    'hours': 0.017,
+    'bms_id': None,
+    'resolution': 'auto',
+    'target_points': 300
+}
+
+
+def normalize_view_config(data=None):
+    """Normalize view configuration payload from client or API params."""
+    payload = data or {}
+    try:
+        hours = float(payload.get('hours', DEFAULT_VIEW_CONFIG['hours']))
+    except (TypeError, ValueError):
+        hours = DEFAULT_VIEW_CONFIG['hours']
+
+    bms_id = payload.get('bms_id', DEFAULT_VIEW_CONFIG['bms_id'])
+    if bms_id == '':
+        bms_id = None
+
+    resolution = payload.get('resolution', DEFAULT_VIEW_CONFIG['resolution']) or 'auto'
+    if resolution not in ['auto', '10s', '30s', '1m', '3m', '5m']:
+        resolution = 'auto'
+
+    try:
+        target_points = int(payload.get('target_points', DEFAULT_VIEW_CONFIG['target_points']))
+    except (TypeError, ValueError):
+        target_points = DEFAULT_VIEW_CONFIG['target_points']
+    target_points = max(50, min(1000, target_points))
+
+    return {
+        'hours': hours,
+        'bms_id': bms_id,
+        'resolution': resolution,
+        'target_points': target_points
+    }
 
 
 def background_monitor():
@@ -41,24 +77,42 @@ def background_monitor():
             if current_count > last_data_count:
                 print(f"New data detected! Count: {last_data_count} -> {current_count}")
                 
-                # Get latest data
                 latest = get_latest_reading()
-                if latest:
-                    print(f"Broadcasting telemetry update: {latest['timestamp']}")
+                if latest and connected_clients:
+                    print(f"Broadcasting view-aware telemetry updates for timestamp: {latest['timestamp']}")
                     try:
-                        # Use socketio.start_background_task or emit with namespace
-                        if connected_clients:
-                            # Use the socketio server directly for background emissions
-                            socketio.server.emit('telemetry_update', latest)
-                            print(f"WebSocket emit successful to {len(connected_clients)} clients")
-                        else:
-                            print("No connected clients to broadcast to")
+                        for sid in list(connected_clients):
+                            view_cfg = client_view_config.get(sid, DEFAULT_VIEW_CONFIG)
+                            bms_filter = view_cfg.get('bms_id')
+
+                            latest_point = get_latest_point_for_view(
+                                view_cfg['hours'],
+                                bms_filter,
+                                view_cfg['resolution'],
+                                view_cfg['target_points']
+                            )
+                            if not latest_point:
+                                continue
+
+                            bucket_seconds = resolve_bucket_seconds(
+                                view_cfg['hours'],
+                                view_cfg['resolution'],
+                                view_cfg['target_points']
+                            )
+                            socketio.server.emit('telemetry_update', {
+                                'point': latest_point,
+                                'meta': {
+                                    'bucket_seconds': bucket_seconds,
+                                    'is_aggregated': bucket_seconds > 10,
+                                    'resolution': view_cfg['resolution']
+                                }
+                            }, room=sid)
                     except Exception as emit_error:
                         print(f"WebSocket emit failed: {emit_error}")
                         import traceback
                         traceback.print_exc()
                 else:
-                    print("No latest reading found")
+                    print("No latest reading found or no connected clients")
                 
                 last_data_count = current_count
             
@@ -92,14 +146,27 @@ def dashboard():
 @app.route('/api/data')
 def api_data():
     """API endpoint to get telemetry data"""
-    hours = request.args.get('hours', default=1, type=float)
-    bms_id = request.args.get('bms_id', default=None, type=str)
+    view_config = normalize_view_config({
+        'hours': request.args.get('hours', default=1, type=float),
+        'bms_id': request.args.get('bms_id', default=None, type=str),
+        'resolution': request.args.get('resolution', default='auto', type=str),
+        'target_points': request.args.get('target_points', default=300, type=int)
+    })
     
     try:
-        print(f"API: Fetching data for {hours} hours, BMS ID: {bms_id}")
-        data = get_telemetry_data(hours, bms_id)
-        print(f"API: Returning {len(data)} records")
-        return jsonify(data)
+        print(
+            "API: Fetching data for "
+            f"{view_config['hours']} hours, BMS ID: {view_config['bms_id']}, "
+            f"resolution: {view_config['resolution']}"
+        )
+        data, meta = get_telemetry_data_for_view(
+            view_config['hours'],
+            view_config['bms_id'],
+            view_config['resolution'],
+            view_config['target_points']
+        )
+        print(f"API: Returning {len(data)} records (bucket {meta['bucket_seconds']}s)")
+        return jsonify({'records': data, 'meta': meta})
     except Exception as e:
         print(f"Error fetching data: {e}")
         return jsonify({'error': str(e)}), 500
@@ -210,7 +277,9 @@ def handle_connect(auth):
     global monitoring_active, monitoring_thread, connected_clients
     
     print(f'Client connected: {request.sid}')
-    connected_clients.add(request.sid)
+    sid = request.sid
+    connected_clients.add(sid)
+    client_view_config[sid] = DEFAULT_VIEW_CONFIG.copy()
     print(f"Total connected clients: {len(connected_clients)}")
     
     # Start monitoring thread if not already running
@@ -225,9 +294,15 @@ def handle_connect(auth):
     # Send initial data to the newly connected client
     try:
         print("Sending initial data to client...")
-        recent_data = get_recent_data_for_websocket(50)
-        emit('initial_data', recent_data)
-        print(f"Sent {len(recent_data)} initial records")
+        view_cfg = client_view_config[sid]
+        records, meta = get_telemetry_data_for_view(
+            view_cfg['hours'],
+            view_cfg['bms_id'],
+            view_cfg['resolution'],
+            view_cfg['target_points']
+        )
+        emit('initial_data', {'records': records, 'meta': meta})
+        print(f"Sent {len(records)} initial records")
         
         stats = get_statistics(24)
         emit('statistics', stats)
@@ -247,6 +322,7 @@ def handle_disconnect():
     
     print(f'Client disconnected: {request.sid}')
     connected_clients.discard(request.sid)
+    client_view_config.pop(request.sid, None)
     print(f"Total connected clients: {len(connected_clients)}")
 
 
@@ -262,13 +338,37 @@ def handle_test_message(data):
 def handle_request_data(data):
     """Handle client request for specific data"""
     try:
-        hours = data.get('hours', 1)
-        telemetry_data = get_telemetry_data(hours)
-        emit('historical_data', telemetry_data)
+        view_config = normalize_view_config(data)
+        telemetry_data, meta = get_telemetry_data_for_view(
+            view_config['hours'],
+            view_config['bms_id'],
+            view_config['resolution'],
+            view_config['target_points']
+        )
+        emit('historical_data', {'records': telemetry_data, 'meta': meta})
         
     except Exception as e:
         print(f"Error handling data request: {e}")
         emit('error', {'message': 'Failed to fetch requested data'})
+
+
+@socketio.on('set_view')
+def handle_set_view(data):
+    """Update the client's live view preferences and return snapshot data."""
+    try:
+        sid = request.sid
+        view_config = normalize_view_config(data)
+        client_view_config[sid] = view_config
+        records, meta = get_telemetry_data_for_view(
+            view_config['hours'],
+            view_config['bms_id'],
+            view_config['resolution'],
+            view_config['target_points']
+        )
+        emit('view_data', {'records': records, 'meta': meta})
+    except Exception as e:
+        print(f"Error handling set_view: {e}")
+        emit('error', {'message': 'Failed to update live view settings'})
 
 
 @socketio.on('request_statistics')

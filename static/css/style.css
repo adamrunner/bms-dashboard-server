@@ -47,6 +47,24 @@
 .connection-status span { 
     vertical-align: text-top;
 }
+
+.fetch-status {
+    display: none;
+    margin-top: 0.35rem;
+    margin-left: 0.4rem;
+}
+
+.fetch-status-visible {
+    display: inline-block;
+}
+
+.fetch-status-warning {
+    background-color: #fd7e14;
+}
+
+.fetch-status-error {
+    background-color: #dc3545;
+}
 .status-connected {
     background-color: #28a745;
     animation: subtle-glow 2s ease-in-out infinite alternate;
@@ -91,4 +109,26 @@ body {
 
 .card {
     margin-bottom: 2em;
+}
+
+.chart-loading-overlay {
+    position: sticky;
+    top: 0.75rem;
+    z-index: 900;
+    display: none;
+    width: 100%;
+    padding: 0.75rem;
+    border: 1px solid #cfe2ff;
+    border-radius: 0.5rem;
+    background: rgba(255, 255, 255, 0.95);
+    color: #0d6efd;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    text-align: center;
+    margin-bottom: 1rem;
+}
+
+.chart-loading-overlay.show {
+    display: flex;
 }

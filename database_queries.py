@@ -5,10 +5,240 @@ Database query functions for BMS telemetry data
 
 import sqlite3
 import os
+import math
 from datetime import datetime, timedelta
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Tuple
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
+
+ALLOWED_BUCKET_SECONDS = [10, 30, 60, 180, 300]
+RESOLUTION_SECONDS_MAP = {
+    '10s': 10,
+    '30s': 30,
+    '1m': 60,
+    '3m': 180,
+    '5m': 300
+}
+
+
+def resolve_bucket_seconds(hours: float, resolution: str = 'auto', target_points: int = 300) -> int:
+    """Resolve requested resolution into a bucket size in seconds."""
+    if resolution in RESOLUTION_SECONDS_MAP:
+        return RESOLUTION_SECONDS_MAP[resolution]
+
+    if resolution == 'auto':
+        # Explicit stepped defaults tuned for dashboard readability.
+        if hours <= 0.167:  # 10 minutes
+            return 10
+        if hours <= 0.5:  # 30 minutes
+            return 30
+        if hours <= 1:
+            return 60
+        if hours <= 6:
+            return 180
+        return 300
+
+    # Fallback: compute from target points and snap to nearest supported bucket.
+    ideal = max(10, int(math.ceil((hours * 3600.0) / max(50, target_points))))
+    return min(ALLOWED_BUCKET_SECONDS, key=lambda value: abs(value - ideal))
+
+
+def _fetch_raw_data(hours: float, bms_id: Optional[str] = None) -> List[Dict]:
+    """Get raw telemetry data for the specified number of hours."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
+
+        if bms_id:
+            cursor.execute("""
+                SELECT * FROM bms_telemetry
+                WHERE timestamp >= ? AND bms_id = ?
+                ORDER BY timestamp ASC
+            """, (cutoff_time, bms_id))
+        else:
+            cursor.execute("""
+                SELECT * FROM bms_telemetry
+                WHERE timestamp >= ?
+                ORDER BY timestamp ASC
+            """, (cutoff_time,))
+
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[str] = None) -> List[Dict]:
+    """Get bucketed telemetry data where each row is an aggregated time bucket."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
+
+        if bms_id:
+            cursor.execute("""
+                SELECT
+                    CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
+                    AVG(pack_voltage_v) AS pack_voltage_v,
+                    AVG(pack_current_a) AS pack_current_a,
+                    AVG(state_of_charge_pct) AS state_of_charge_pct,
+                    AVG(power_w) AS power_w,
+                    AVG(cells_v_1) AS cells_v_1,
+                    AVG(cells_v_2) AS cells_v_2,
+                    AVG(cells_v_3) AS cells_v_3,
+                    AVG(cells_v_4) AS cells_v_4,
+                    AVG(temps_c_1) AS temps_c_1,
+                    AVG(temps_c_2) AS temps_c_2,
+                    AVG(temps_c_3) AS temps_c_3,
+                    MIN(min_temp_c) AS min_temp_c,
+                    MAX(max_temp_c) AS max_temp_c
+                FROM bms_telemetry
+                WHERE timestamp >= ? AND bms_id = ?
+                GROUP BY CAST((timestamp / ?) AS INTEGER)
+                ORDER BY timestamp ASC
+            """, (bucket_seconds, bucket_seconds, cutoff_time, bms_id, bucket_seconds))
+        else:
+            cursor.execute("""
+                SELECT
+                    CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
+                    AVG(pack_voltage_v) AS pack_voltage_v,
+                    AVG(pack_current_a) AS pack_current_a,
+                    AVG(state_of_charge_pct) AS state_of_charge_pct,
+                    AVG(power_w) AS power_w,
+                    AVG(cells_v_1) AS cells_v_1,
+                    AVG(cells_v_2) AS cells_v_2,
+                    AVG(cells_v_3) AS cells_v_3,
+                    AVG(cells_v_4) AS cells_v_4,
+                    AVG(temps_c_1) AS temps_c_1,
+                    AVG(temps_c_2) AS temps_c_2,
+                    AVG(temps_c_3) AS temps_c_3,
+                    MIN(min_temp_c) AS min_temp_c,
+                    MAX(max_temp_c) AS max_temp_c
+                FROM bms_telemetry
+                WHERE timestamp >= ?
+                GROUP BY CAST((timestamp / ?) AS INTEGER)
+                ORDER BY timestamp ASC
+            """, (bucket_seconds, bucket_seconds, cutoff_time, bucket_seconds))
+
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
+def get_telemetry_data_for_view(
+    hours: float = 1,
+    bms_id: Optional[str] = None,
+    resolution: str = 'auto',
+    target_points: int = 300
+) -> Tuple[List[Dict], Dict]:
+    """Get telemetry data and metadata for a dashboard view with optional bucketing."""
+    bucket_seconds = resolve_bucket_seconds(hours, resolution, target_points)
+    is_aggregated = bucket_seconds > 10
+
+    if is_aggregated:
+        data = _fetch_aggregated_data(hours, bucket_seconds, bms_id)
+    else:
+        data = _fetch_raw_data(hours, bms_id)
+
+    metadata = {
+        'resolution': resolution,
+        'bucket_seconds': bucket_seconds,
+        'is_aggregated': is_aggregated,
+        'point_count': len(data),
+        'hours': hours,
+        'bms_id': bms_id
+    }
+    return data, metadata
+
+
+def get_latest_point_for_view(
+    hours: float = 1,
+    bms_id: Optional[str] = None,
+    resolution: str = 'auto',
+    target_points: int = 300
+) -> Optional[Dict]:
+    """Get the latest point for a client view (raw or aggregated)."""
+    bucket_seconds = resolve_bucket_seconds(hours, resolution, target_points)
+    if bucket_seconds <= 10:
+        return get_latest_reading(bms_id)
+    cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        if bms_id:
+            cursor.execute("""
+                SELECT MAX(timestamp) AS latest_timestamp
+                FROM bms_telemetry
+                WHERE timestamp >= ? AND bms_id = ?
+            """, (cutoff_time, bms_id))
+        else:
+            cursor.execute("""
+                SELECT MAX(timestamp) AS latest_timestamp
+                FROM bms_telemetry
+                WHERE timestamp >= ?
+            """, (cutoff_time,))
+
+        latest_row = cursor.fetchone()
+        latest_timestamp = latest_row['latest_timestamp'] if latest_row else None
+        if latest_timestamp is None:
+            return None
+
+        bucket_start = int((latest_timestamp // bucket_seconds) * bucket_seconds)
+        bucket_end = bucket_start + bucket_seconds
+
+        if bms_id:
+            cursor.execute("""
+                SELECT
+                    ? AS timestamp,
+                    AVG(pack_voltage_v) AS pack_voltage_v,
+                    AVG(pack_current_a) AS pack_current_a,
+                    AVG(state_of_charge_pct) AS state_of_charge_pct,
+                    AVG(power_w) AS power_w,
+                    AVG(cells_v_1) AS cells_v_1,
+                    AVG(cells_v_2) AS cells_v_2,
+                    AVG(cells_v_3) AS cells_v_3,
+                    AVG(cells_v_4) AS cells_v_4,
+                    AVG(temps_c_1) AS temps_c_1,
+                    AVG(temps_c_2) AS temps_c_2,
+                    AVG(temps_c_3) AS temps_c_3,
+                    MIN(min_temp_c) AS min_temp_c,
+                    MAX(max_temp_c) AS max_temp_c
+                FROM bms_telemetry
+                WHERE timestamp >= ? AND timestamp < ? AND bms_id = ?
+            """, (bucket_start, bucket_start, bucket_end, bms_id))
+        else:
+            cursor.execute("""
+                SELECT
+                    ? AS timestamp,
+                    AVG(pack_voltage_v) AS pack_voltage_v,
+                    AVG(pack_current_a) AS pack_current_a,
+                    AVG(state_of_charge_pct) AS state_of_charge_pct,
+                    AVG(power_w) AS power_w,
+                    AVG(cells_v_1) AS cells_v_1,
+                    AVG(cells_v_2) AS cells_v_2,
+                    AVG(cells_v_3) AS cells_v_3,
+                    AVG(cells_v_4) AS cells_v_4,
+                    AVG(temps_c_1) AS temps_c_1,
+                    AVG(temps_c_2) AS temps_c_2,
+                    AVG(temps_c_3) AS temps_c_3,
+                    MIN(min_temp_c) AS min_temp_c,
+                    MAX(max_temp_c) AS max_temp_c
+                FROM bms_telemetry
+                WHERE timestamp >= ? AND timestamp < ?
+            """, (bucket_start, bucket_start, bucket_end))
+
+        aggregated_row = cursor.fetchone()
+        if not aggregated_row:
+            return None
+        row_dict = dict(aggregated_row)
+        if row_dict.get('pack_voltage_v') is None:
+            return None
+        return row_dict
+    finally:
+        conn.close()
 
 
 def get_db_connection():
@@ -59,28 +289,7 @@ def get_latest_reading(bms_id: Optional[str] = None) -> Optional[Dict]:
 
 def get_telemetry_data(hours: float = 1, bms_id: Optional[str] = None) -> List[Dict]:
     """Get telemetry data for the specified number of hours"""
-    conn = get_db_connection()
-    try:
-        cursor = conn.cursor()
-        cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
-        
-        if bms_id:
-            cursor.execute("""
-                SELECT * FROM bms_telemetry 
-                WHERE timestamp >= ? AND bms_id = ?
-                ORDER BY timestamp ASC
-            """, (cutoff_time, bms_id))
-        else:
-            cursor.execute("""
-                SELECT * FROM bms_telemetry 
-                WHERE timestamp >= ? 
-                ORDER BY timestamp ASC
-            """, (cutoff_time,))
-        
-        rows = cursor.fetchall()
-        return [dict(row) for row in rows]
-    finally:
-        conn.close()
+    return _fetch_raw_data(hours, bms_id)
 
 
 def get_pack_voltage_data(hours: float = 1, bms_id: Optional[str] = None) -> List[Dict]:
