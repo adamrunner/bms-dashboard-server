@@ -75,7 +75,7 @@ def resolve_mqtt_credentials() -> tuple[str, str]:
 MQTT_BROKER = os.getenv("MQTT_BROKER", "mosquitto")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USERNAME, MQTT_PASSWORD = resolve_mqtt_credentials()
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry")
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry/+")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
 
 INSERT_COLUMNS = ', '.join(EXPECTED_COLUMNS)

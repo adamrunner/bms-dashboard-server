@@ -60,7 +60,7 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 
 ### 1. MQTT Data Flow
 - **BMS devices** → publish CSV telemetry data → **MQTT broker** (Eclipse Mosquitto)
-- **MQTT Logger** (`bms_mqtt_logger.py`) → subscribes to `bms/telemetry` topic → parses CSV → stores in SQLite
+- **MQTT Logger** (`bms_mqtt_logger.py`) → subscribes to `bms/telemetry/+` topic → parses CSV → stores in SQLite
 - Data format: CSV without headers, 29 columns of battery telemetry (voltage, current, temperature, SoC, etc.)
 
 ### 2. Web Dashboard 
@@ -79,7 +79,7 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 ### Environment Variables (.env)
 - `MQTT_BROKER`: Hostname of MQTT broker (default: `mosquitto` for Docker, `anton.local` for external)
 - `MQTT_USERNAME`/`MQTT_PASSWORD`: MQTT authentication
-- `MQTT_TOPIC`: Topic to subscribe to (default: `bms/telemetry`)
+- `MQTT_TOPIC`: Topic to subscribe to (default: `bms/telemetry/+`)
 - `DATABASE_PATH`: SQLite database location
 - `DASHBOARD_PORT`: Web dashboard port (default: 5000)
 

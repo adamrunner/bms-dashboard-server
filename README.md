@@ -65,7 +65,7 @@ MQTT_BROKER=mosquitto          # Use internal broker or external hostname
 MQTT_PORT=1883
 MQTT_USERNAME=admin            # required outside development
 MQTT_PASSWORD=password1234     # required outside development
-MQTT_TOPIC=bms/telemetry
+MQTT_TOPIC=bms/telemetry/+     # subscribe to bms/telemetry/<bms-id>
 
 # Dashboard secret
 FLASK_SECRET_KEY=change-me     # required outside development

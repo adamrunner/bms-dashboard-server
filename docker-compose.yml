@@ -45,7 +45,7 @@ services:
       MQTT_PORT: ${MQTT_PORT:-1883}
       MQTT_USERNAME: ${MQTT_USERNAME:-}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-}
-      MQTT_TOPIC: ${MQTT_TOPIC:-bms/telemetry}
+      MQTT_TOPIC: ${MQTT_TOPIC:-bms/telemetry/+}
       DATABASE_PATH: /app/data/bms_telemetry.db
     volumes:
       - .:/app/data
