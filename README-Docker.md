@@ -45,11 +45,14 @@ The system consists of three containerized services:
 Create a `.env` file based on `.env.example`:
 
 ```bash
+# Runtime mode
+APP_ENV=development
+
 # MQTT Broker Configuration
 MQTT_BROKER=mosquitto          # Use internal broker
 MQTT_PORT=1883
-MQTT_USERNAME=admin
-MQTT_PASSWORD=password1234
+MQTT_USERNAME=admin            # required outside development
+MQTT_PASSWORD=password1234     # required outside development
 MQTT_TOPIC=bms/telemetry
 
 # Mosquitto Service Configuration
@@ -59,7 +62,12 @@ MQTT_WEBSOCKET_PORT=9001       # WebSocket port
 # Dashboard Configuration
 DASHBOARD_PORT=5000
 FLASK_DEBUG=false
+FLASK_SECRET_KEY=change-me     # required outside development
 ```
+
+Telemetry payloads published to `MQTT_TOPIC` must contain 30 CSV columns, starting with `bms_id` followed by the telemetry fields stored in `bms_telemetry`.
+
+When `APP_ENV=development`, the Python services will log a warning and use development-only fallback values if `FLASK_SECRET_KEY` or MQTT credentials are omitted. In any other environment, those variables must be set explicitly or the services will fail to start.
 
 ### Using External MQTT Broker
 

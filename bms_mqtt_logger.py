@@ -12,14 +12,9 @@ import sys
 import os
 from datetime import datetime
 import paho.mqtt.client as mqtt
+from database_queries import ensure_database_schema, create_db_connection
 
-# Configuration
-MQTT_BROKER = os.getenv("MQTT_BROKER", "anton.local")
-MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
-MQTT_USERNAME = os.getenv("MQTT_USERNAME", "admin")
-MQTT_PASSWORD = os.getenv("MQTT_PASSWORD", "password1234")
-MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry/bms-404CCAFFFE43")
-DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
+DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
 
 # Expected CSV columns
 EXPECTED_COLUMNS = [
@@ -44,6 +39,50 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
+def get_app_env() -> str:
+    """Return the current application environment name."""
+    return os.getenv('APP_ENV', 'development').strip().lower()
+
+
+def is_development_env() -> bool:
+    """Return True when running in development mode."""
+    return get_app_env() in DEVELOPMENT_ENV_NAMES
+
+
+def resolve_mqtt_credentials() -> tuple[str, str]:
+    """Resolve MQTT credentials with explicit development behavior."""
+    username = os.getenv('MQTT_USERNAME')
+    password = os.getenv('MQTT_PASSWORD')
+
+    if username and password:
+        return username, password
+
+    if username or password:
+        raise RuntimeError("MQTT_USERNAME and MQTT_PASSWORD must both be set")
+
+    if is_development_env():
+        logger.warning(
+            "MQTT credentials not set; using development-only fallback credentials"
+        )
+        return 'admin', 'password1234'
+
+    raise RuntimeError(
+        "MQTT_USERNAME and MQTT_PASSWORD must be set when APP_ENV is not development"
+    )
+
+
+# Configuration
+MQTT_BROKER = os.getenv("MQTT_BROKER", "mosquitto")
+MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
+MQTT_USERNAME, MQTT_PASSWORD = resolve_mqtt_credentials()
+MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry")
+DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
+
+INSERT_COLUMNS = ', '.join(EXPECTED_COLUMNS)
+INSERT_PLACEHOLDERS = ', '.join(['?' for _ in EXPECTED_COLUMNS])
+INSERT_SQL = f"INSERT INTO bms_telemetry ({INSERT_COLUMNS}) VALUES ({INSERT_PLACEHOLDERS})"
+
+
 def init_database():
     """Initialize SQLite database with schema"""
     try:
@@ -53,25 +92,13 @@ def init_database():
             os.makedirs(db_dir, exist_ok=True)
             logger.info(f"Created database directory: {db_dir}")
             
-        conn = sqlite3.connect(DATABASE_PATH)
+        ensure_database_schema()
+
+        conn = create_db_connection(use_row_factory=False)
         cursor = conn.cursor()
-        
-        # Check if table already exists and has data
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bms_telemetry'")
-        table_exists = cursor.fetchone()
-        
-        if table_exists:
-            cursor.execute("SELECT COUNT(*) FROM bms_telemetry")
-            record_count = cursor.fetchone()[0]
-            logger.info(f"Database already exists with {record_count} records at: {DATABASE_PATH}")
-        else:
-            logger.info("Creating new database schema")
-            with open('bms_schema.sql', 'r') as f:
-                schema = f.read()
-            conn.executescript(schema)
-            conn.commit()
-            logger.info(f"Database initialized successfully at: {DATABASE_PATH}")
-            
+        cursor.execute("SELECT COUNT(*) FROM bms_telemetry")
+        record_count = cursor.fetchone()[0]
+        logger.info(f"Database schema ready with {record_count} records at: {DATABASE_PATH}")
         conn.close()
     except Exception as e:
         logger.error(f"Failed to initialize database: {e}")
@@ -113,32 +140,27 @@ def insert_telemetry_data(csv_data):
     try:
         # Parse CSV data (no headers in MQTT data)
         csv_reader = csv.reader(io.StringIO(csv_data.strip()))
-        
-        conn = sqlite3.connect(DATABASE_PATH)
+
+        conn = create_db_connection(use_row_factory=False)
         cursor = conn.cursor()
-        
-        rows_inserted = 0
+        rows_to_insert = []
+
         for row in csv_reader:
             if len(row) != len(EXPECTED_COLUMNS):
                 logger.warning(f"Row has {len(row)} columns, expected {len(EXPECTED_COLUMNS)}")
                 continue
-                
-            # Convert values to appropriate types
-            values = []
-            for i, value in enumerate(row):
-                column_name = EXPECTED_COLUMNS[i]
-                converted_value = convert_value(value, column_name)
-                values.append(converted_value)
-            
-            # Insert into database
-            placeholders = ', '.join(['?' for _ in EXPECTED_COLUMNS])
-            columns = ', '.join(EXPECTED_COLUMNS)
-            
-            cursor.execute(
-                f"INSERT INTO bms_telemetry ({columns}) VALUES ({placeholders})",
-                values
-            )
-            rows_inserted += 1
+
+            rows_to_insert.append([
+                convert_value(value, EXPECTED_COLUMNS[i])
+                for i, value in enumerate(row)
+            ])
+
+        if not rows_to_insert:
+            logger.warning("No valid telemetry rows found in MQTT payload")
+            return
+
+        cursor.executemany(INSERT_SQL, rows_to_insert)
+        rows_inserted = len(rows_to_insert)
         
         conn.commit()
         logger.info(f"Successfully inserted {rows_inserted} row(s) of telemetry data")

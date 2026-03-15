@@ -65,12 +65,12 @@
                     <div class="card-body">
                         <h5 class="card-title">Time Range</h5>
                         <div class="btn-group" role="group">
-                            <button type="button" class="btn btn-outline-primary time-range-btn active" onclick="setTimeRange(0.017, this)">1 Min</button>
-                            <button type="button" class="btn btn-outline-primary time-range-btn" onclick="setTimeRange(0.167, this)">10 Min</button>
-                            <button type="button" class="btn btn-outline-primary time-range-btn" onclick="setTimeRange(0.5, this)">30 Min</button>
-                            <button type="button" class="btn btn-outline-primary time-range-btn" onclick="setTimeRange(1, this)">1 Hour</button>
-                            <button type="button" class="btn btn-outline-primary time-range-btn" onclick="setTimeRange(6, this)">6 Hours</button>
-                            <button type="button" class="btn btn-outline-primary time-range-btn" onclick="setTimeRange(24, this)">24 Hours</button>
+                            <button type="button" class="btn btn-outline-primary time-range-btn active" data-hours="0.017" onclick="setTimeRange(0.017, this)">1 Min</button>
+                            <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="0.167" onclick="setTimeRange(0.167, this)">10 Min</button>
+                            <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="0.5" onclick="setTimeRange(0.5, this)">30 Min</button>
+                            <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="1" onclick="setTimeRange(1, this)">1 Hour</button>
+                            <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="6" onclick="setTimeRange(6, this)">6 Hours</button>
+                            <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="24" onclick="setTimeRange(24, this)">24 Hours</button>
                         </div>
                         <div class="small text-muted mt-2" id="dataResolutionInfo">Resolution: --</div>
                         <div class="small text-muted" id="dataPointInfo">Points: --</div>

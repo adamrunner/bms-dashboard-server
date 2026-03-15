@@ -57,12 +57,18 @@ The system consists of three containerized services:
 Edit `.env` file to configure:
 
 ```bash
+# Runtime mode
+APP_ENV=development           # development uses explicit fallback secrets; production requires env vars
+
 # MQTT Configuration
 MQTT_BROKER=mosquitto          # Use internal broker or external hostname
 MQTT_PORT=1883
-MQTT_USERNAME=admin
-MQTT_PASSWORD=password1234
+MQTT_USERNAME=admin            # required outside development
+MQTT_PASSWORD=password1234     # required outside development
 MQTT_TOPIC=bms/telemetry
+
+# Dashboard secret
+FLASK_SECRET_KEY=change-me     # required outside development
 
 # Service Ports
 MQTT_EXTERNAL_PORT=1883        # MQTT port
@@ -71,15 +77,42 @@ DASHBOARD_PORT=5000            # Web dashboard port
 FLASK_DEBUG=false
 ```
 
+In `APP_ENV=development`, the dashboard and logger will log a warning and use development-only fallback values if `FLASK_SECRET_KEY` or MQTT credentials are unset. In any other environment, startup fails unless those variables are set explicitly.
+
 ### Data Format
 
-The system expects CSV telemetry data with 29 columns:
-- Timestamps and timing data
-- Pack voltage, current, power, and state of charge
-- Individual cell voltages (1-4)
-- Temperature measurements (1-3)
-- Capacity and peak power metrics
-- Charging/discharging status
+The system expects CSV telemetry data with 30 columns. The first column is the BMS identifier, followed by the telemetry payload:
+
+1. `bms_id`
+2. `timestamp`
+3. `elapsed_seconds`
+4. `elapsed_hms`
+5. `total_energy_wh`
+6. `pack_voltage_v`
+7. `pack_current_a`
+8. `state_of_charge_pct`
+9. `power_w`
+10. `full_capacity_ah`
+11. `peak_current_a`
+12. `peak_power_w`
+13. `cell_count`
+14. `min_cell_voltage_v`
+15. `min_cell_num`
+16. `max_cell_voltage_v`
+17. `max_cell_num`
+18. `cell_voltage_delta_v`
+19. `temp_count`
+20. `min_temp_c`
+21. `max_temp_c`
+22. `charging_enabled`
+23. `discharging_enabled`
+24. `cells_v_1`
+25. `cells_v_2`
+26. `cells_v_3`
+27. `cells_v_4`
+28. `temps_c_1`
+29. `temps_c_2`
+30. `temps_c_3`
 
 ## API Endpoints
 

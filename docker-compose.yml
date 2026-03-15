@@ -24,9 +24,9 @@ services:
           "-m",
           "health_check",
           "-u",
-          "admin",
+          "${MQTT_USERNAME:-admin}",
           "-P",
-          "password1234",
+          "${MQTT_PASSWORD:-password1234}",
         ]
       interval: 30s
       timeout: 10s
@@ -40,12 +40,13 @@ services:
     container_name: bms-mqtt-logger
     restart: unless-stopped
     environment:
-      - MQTT_BROKER=${MQTT_BROKER:-mosquitto}
-      - MQTT_PORT=${MQTT_PORT:-1883}
-      - MQTT_USERNAME=${MQTT_USERNAME:-admin}
-      - MQTT_PASSWORD=${MQTT_PASSWORD:-password1234}
-      - MQTT_TOPIC=${MQTT_TOPIC:-bms/telemetry}
-      - DATABASE_PATH=/app/data/bms_telemetry.db
+      APP_ENV: ${APP_ENV:-development}
+      MQTT_BROKER: ${MQTT_BROKER:-mosquitto}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME:-}
+      MQTT_PASSWORD: ${MQTT_PASSWORD:-}
+      MQTT_TOPIC: ${MQTT_TOPIC:-bms/telemetry}
+      DATABASE_PATH: /app/data/bms_telemetry.db
     volumes:
       - .:/app/data
     networks:
@@ -73,10 +74,12 @@ services:
     container_name: bms-dashboard
     restart: unless-stopped
     environment:
-      - DATABASE_PATH=/app/data/bms_telemetry.db
-      - FLASK_HOST=0.0.0.0
-      - FLASK_PORT=5000
-      - FLASK_DEBUG=${FLASK_DEBUG:-false}
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_PATH: /app/data/bms_telemetry.db
+      FLASK_HOST: 0.0.0.0
+      FLASK_PORT: 5000
+      FLASK_DEBUG: ${FLASK_DEBUG:-false}
+      FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:-}
     ports:
       - "${DASHBOARD_PORT:-5000}:5000"
     volumes:

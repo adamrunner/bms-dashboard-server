@@ -9,6 +9,16 @@ let currentBucketSeconds = 10;
 let activeDataRequestController = null;
 let latestDataRequestId = 0;
 let fetchStatusTimer = null;
+let bmsSelectionReady = false;
+
+const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m'];
+const CHART_DATA_FIELDS = {
+    pack: ['pack_voltage_v', 'pack_current_a'],
+    soc: ['state_of_charge_pct'],
+    cell: ['cells_v_1', 'cells_v_2', 'cells_v_3', 'cells_v_4'],
+    temp: ['temps_c_1', 'temps_c_2', 'temps_c_3'],
+    power: ['power_w']
+};
 
 // Helper function to trigger glow effect on connection status badge
 function triggerGlowEffect() {
@@ -62,6 +72,12 @@ const chartConfig = {
             }
         },
         plugins: {
+            decimation: {
+                enabled: true,
+                algorithm: 'lttb',
+                samples: 300,
+                threshold: 600
+            },
             legend: {
                 position: 'top'
             },
@@ -84,18 +100,79 @@ const chartConfig = {
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
     initializeCharts();
+    applyInitialStateFromUrl();
     loadBmsIds();
-    connectWebSocket();
 
     document.getElementById('autoRefresh').addEventListener('change', function() {
+        updateUrlState();
         if (this.checked) {
             connectWebSocket();
-            sendViewSubscription();
+            refreshDashboardData('refresh');
         } else if (socket) {
             socket.disconnect();
         }
     });
+
+    if (document.getElementById('autoRefresh').checked) {
+        connectWebSocket();
+    }
 });
+
+function applyInitialStateFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const autoRefreshToggle = document.getElementById('autoRefresh');
+    const resolutionSelect = document.getElementById('resolutionSelect');
+
+    const hoursParam = params.get('hours');
+    if (hoursParam !== null) {
+        const parsedHours = Number.parseFloat(hoursParam);
+        if (Number.isFinite(parsedHours) && parsedHours > 0) {
+            currentTimeRange = parsedHours;
+        }
+    }
+
+    const bmsIdParam = params.get('bms_id');
+    if (bmsIdParam !== null) {
+        currentBmsId = bmsIdParam;
+    }
+
+    const resolutionParam = params.get('resolution');
+    if (resolutionParam && VALID_RESOLUTIONS.includes(resolutionParam)) {
+        currentResolution = resolutionParam;
+    }
+
+    const autoRefreshParam = params.get('auto_refresh');
+    if (autoRefreshParam !== null) {
+        autoRefreshToggle.checked = !['0', 'false', 'off', 'no'].includes(autoRefreshParam.toLowerCase());
+    }
+
+    resolutionSelect.value = currentResolution;
+    updateActiveTimeRangeButton();
+}
+
+function updateUrlState() {
+    const url = new URL(window.location.href);
+    url.searchParams.set('hours', String(currentTimeRange));
+    url.searchParams.set('resolution', currentResolution);
+    url.searchParams.set('auto_refresh', document.getElementById('autoRefresh').checked ? '1' : '0');
+
+    if (currentBmsId) {
+        url.searchParams.set('bms_id', currentBmsId);
+    } else {
+        url.searchParams.delete('bms_id');
+    }
+
+    history.replaceState(null, '', url);
+}
+
+function updateActiveTimeRangeButton() {
+    const selectedHours = Number(currentTimeRange);
+    document.querySelectorAll('.time-range-btn').forEach(btn => {
+        const buttonHours = Number.parseFloat(btn.dataset.hours || '');
+        const isActive = Number.isFinite(buttonHours) && Math.abs(buttonHours - selectedHours) < 0.0001;
+        btn.classList.toggle('active', isActive);
+    });
+}
 
 function setLoadingState(isLoading, message = 'Loading telemetry data...', sourceModule = 'time') {
     const moduleMap = {
@@ -394,7 +471,9 @@ function connectWebSocket() {
         document.getElementById('connectionStatus').className = 'badge status-connected';
         console.log('WebSocket connected successfully!', socket.id);
         triggerPulseEffect();
-        sendViewSubscription();
+        if (bmsSelectionReady) {
+            refreshDashboardData('refresh');
+        }
     });
 
     socket.on('disconnect', function() {
@@ -416,15 +495,10 @@ function connectWebSocket() {
         triggerGlowEffect();
     });
 
-    socket.on('initial_data', function(payload) {
-        const normalized = normalizeDataPayload(payload);
-        if (normalized.records.length > 0) {
-            updateChartsWithHistoricalData(normalized.records, normalized.meta);
-        }
-    });
-
     socket.on('view_data', function(payload) {
         const normalized = normalizeDataPayload(payload);
+        setLoadingState(false);
+        clearFetchStatus();
         updateChartsWithHistoricalData(normalized.records, normalized.meta);
     });
 
@@ -437,6 +511,7 @@ function connectWebSocket() {
     });
 
     socket.on('error', function(error) {
+        setLoadingState(false);
         console.error('WebSocket error:', error);
     });
 }
@@ -450,7 +525,10 @@ function loadBmsIds() {
             select.innerHTML = '';
 
             if (bmsIds.length > 0) {
-                currentBmsId = bmsIds[0];
+                const selectedBmsId = currentBmsId && bmsIds.includes(currentBmsId)
+                    ? currentBmsId
+                    : bmsIds[0];
+                currentBmsId = selectedBmsId;
                 bmsIds.forEach(bmsId => {
                     const option = document.createElement('option');
                     option.value = bmsId;
@@ -462,14 +540,29 @@ function loadBmsIds() {
                 });
             }
 
-            loadInitialData('bms');
-            sendViewSubscription();
+            bmsSelectionReady = true;
+            updateUrlState();
+            refreshDashboardData('bms');
         })
         .catch(error => {
             console.error('Error loading BMS IDs:', error);
             setFetchStatus('BMS list fetch failed', error.name === 'AbortError' ? 'warning' : 'error');
-            loadInitialData('time');
+            bmsSelectionReady = true;
+            updateUrlState();
+            refreshDashboardData('time');
         });
+}
+
+function refreshDashboardData(sourceModule = 'time') {
+    updateUrlState();
+    if (document.getElementById('autoRefresh').checked && socket && socket.connected) {
+        setLoadingState(true, 'Loading telemetry data...', sourceModule);
+        sendViewSubscription();
+        loadStatistics();
+        return;
+    }
+
+    loadInitialData(sourceModule);
 }
 
 // Load initial data
@@ -509,7 +602,6 @@ function loadInitialData(sourceModule = 'time') {
         .finally(() => {
             if (requestId === latestDataRequestId) {
                 setLoadingState(false);
-                sendViewSubscription();
             }
         });
 
@@ -524,6 +616,27 @@ function clearChartData() {
     });
 }
 
+function buildDatasetPoints(records, field) {
+    return records.map(record => ({
+        x: new Date(record.timestamp * 1000),
+        y: record[field]
+    }));
+}
+
+function assignChartData(chartKey, records) {
+    const fields = CHART_DATA_FIELDS[chartKey];
+    const chart = charts[chartKey];
+    fields.forEach((field, datasetIndex) => {
+        chart.data.datasets[datasetIndex].data = buildDatasetPoints(records, field);
+    });
+}
+
+function assignAllChartData(records) {
+    Object.keys(CHART_DATA_FIELDS).forEach(chartKey => {
+        assignChartData(chartKey, records);
+    });
+}
+
 function updateChartsWithHistoricalData(data, meta = {}) {
     if (!data || data.length === 0) {
         clearChartData();
@@ -532,27 +645,7 @@ function updateChartsWithHistoricalData(data, meta = {}) {
         return;
     }
 
-    clearChartData();
-
-    data.forEach(record => {
-        const timestamp = new Date(record.timestamp * 1000);
-
-        charts.pack.data.datasets[0].data.push({ x: timestamp, y: record.pack_voltage_v });
-        charts.pack.data.datasets[1].data.push({ x: timestamp, y: record.pack_current_a });
-
-        charts.soc.data.datasets[0].data.push({ x: timestamp, y: record.state_of_charge_pct });
-
-        charts.cell.data.datasets[0].data.push({ x: timestamp, y: record.cells_v_1 });
-        charts.cell.data.datasets[1].data.push({ x: timestamp, y: record.cells_v_2 });
-        charts.cell.data.datasets[2].data.push({ x: timestamp, y: record.cells_v_3 });
-        charts.cell.data.datasets[3].data.push({ x: timestamp, y: record.cells_v_4 });
-
-        charts.temp.data.datasets[0].data.push({ x: timestamp, y: record.temps_c_1 });
-        charts.temp.data.datasets[1].data.push({ x: timestamp, y: record.temps_c_2 });
-        charts.temp.data.datasets[2].data.push({ x: timestamp, y: record.temps_c_3 });
-
-        charts.power.data.datasets[0].data.push({ x: timestamp, y: record.power_w });
-    });
+    assignAllChartData(data);
 
     updateResolutionAndPointInfo({ ...meta, point_count: data.length });
 
@@ -575,6 +668,37 @@ function pushOrReplace(dataset, point, replaceTimestamp) {
     dataPoints.push(point);
 }
 
+function appendPointToChartSeries(chartKey, timestamp, data, replaceLastPoint) {
+    const chart = charts[chartKey];
+    CHART_DATA_FIELDS[chartKey].forEach((field, datasetIndex) => {
+        pushOrReplace(
+            chart.data.datasets[datasetIndex],
+            { x: timestamp, y: data[field] },
+            replaceLastPoint
+        );
+    });
+}
+
+function trimDatasetToWindow(dataset, minTimestampMs) {
+    const dataPoints = dataset.data;
+    let trimCount = 0;
+    while (trimCount < dataPoints.length && dataPoints[trimCount].x.getTime() < minTimestampMs) {
+        trimCount += 1;
+    }
+    if (trimCount > 0) {
+        dataPoints.splice(0, trimCount);
+    }
+}
+
+function trimAllChartsToWindow(timeWindowStart) {
+    const minTimestampMs = timeWindowStart.getTime();
+    Object.values(charts).forEach(chart => {
+        chart.data.datasets.forEach(dataset => {
+            trimDatasetToWindow(dataset, minTimestampMs);
+        });
+    });
+}
+
 // Update charts with new real-time data
 function updateChartsWithNewData(data, meta = {}) {
     const timestamp = new Date(data.timestamp * 1000);
@@ -587,26 +711,11 @@ function updateChartsWithNewData(data, meta = {}) {
 
     const replaceLastPoint = (meta.bucket_seconds || currentBucketSeconds) > 10;
 
-    pushOrReplace(charts.pack.data.datasets[0], { x: timestamp, y: data.pack_voltage_v }, replaceLastPoint);
-    pushOrReplace(charts.pack.data.datasets[1], { x: timestamp, y: data.pack_current_a }, replaceLastPoint);
-    pushOrReplace(charts.soc.data.datasets[0], { x: timestamp, y: data.state_of_charge_pct }, replaceLastPoint);
-
-    pushOrReplace(charts.cell.data.datasets[0], { x: timestamp, y: data.cells_v_1 }, replaceLastPoint);
-    pushOrReplace(charts.cell.data.datasets[1], { x: timestamp, y: data.cells_v_2 }, replaceLastPoint);
-    pushOrReplace(charts.cell.data.datasets[2], { x: timestamp, y: data.cells_v_3 }, replaceLastPoint);
-    pushOrReplace(charts.cell.data.datasets[3], { x: timestamp, y: data.cells_v_4 }, replaceLastPoint);
-
-    pushOrReplace(charts.temp.data.datasets[0], { x: timestamp, y: data.temps_c_1 }, replaceLastPoint);
-    pushOrReplace(charts.temp.data.datasets[1], { x: timestamp, y: data.temps_c_2 }, replaceLastPoint);
-    pushOrReplace(charts.temp.data.datasets[2], { x: timestamp, y: data.temps_c_3 }, replaceLastPoint);
-
-    pushOrReplace(charts.power.data.datasets[0], { x: timestamp, y: data.power_w }, replaceLastPoint);
-
-    Object.values(charts).forEach(chart => {
-        chart.data.datasets.forEach(dataset => {
-            dataset.data = dataset.data.filter(point => point.x >= timeWindowStart);
-        });
+    Object.keys(CHART_DATA_FIELDS).forEach(chartKey => {
+        appendPointToChartSeries(chartKey, timestamp, data, replaceLastPoint);
     });
+
+    trimAllChartsToWindow(timeWindowStart);
 
     const animationDuration = currentTimeRange <= 0.5 ? 0 : 300;
     Object.values(charts).forEach(chart => {
@@ -695,27 +804,21 @@ function updateStatistics(stats) {
 
 function setTimeRange(hours, button) {
     currentTimeRange = hours;
+    updateActiveTimeRangeButton();
 
-    document.querySelectorAll('.time-range-btn').forEach(btn => {
-        btn.classList.remove('active');
-    });
-    if (button) {
-        button.classList.add('active');
-    }
-
-    loadInitialData('time');
+    refreshDashboardData('time');
 }
 
 function onBmsIdChange() {
     const select = document.getElementById('bmsIdSelect');
     currentBmsId = select.value;
-    loadInitialData('bms');
+    refreshDashboardData('bms');
 }
 
 function onResolutionChange() {
     const select = document.getElementById('resolutionSelect');
     currentResolution = select.value;
-    loadInitialData('refresh');
+    refreshDashboardData('refresh');
 }
 
 function formatTimestamp(timestamp) {

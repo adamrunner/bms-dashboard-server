@@ -20,6 +20,65 @@ RESOLUTION_SECONDS_MAP = {
     '5m': 300
 }
 
+SCHEMA_PATH = os.path.join(os.path.dirname(__file__), 'bms_schema.sql')
+DASHBOARD_VIEW_COLUMNS = [
+    'timestamp',
+    'pack_voltage_v',
+    'pack_current_a',
+    'state_of_charge_pct',
+    'power_w',
+    'cells_v_1',
+    'cells_v_2',
+    'cells_v_3',
+    'cells_v_4',
+    'temps_c_1',
+    'temps_c_2',
+    'temps_c_3'
+]
+DASHBOARD_VIEW_COLUMN_SQL = ', '.join(DASHBOARD_VIEW_COLUMNS)
+
+
+def create_db_connection(*, use_row_factory: bool = True) -> sqlite3.Connection:
+    """Create a SQLite connection configured for concurrent read/write access."""
+    conn = sqlite3.connect(DATABASE_PATH, timeout=10)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=10000")
+    if use_row_factory:
+        conn.row_factory = sqlite3.Row
+    return conn
+
+
+def ensure_database_schema() -> None:
+    """Create the telemetry schema and indexes if they do not already exist."""
+    db_dir = os.path.dirname(DATABASE_PATH)
+    if db_dir:
+        os.makedirs(db_dir, exist_ok=True)
+
+    conn = create_db_connection(use_row_factory=False)
+    try:
+        with open(SCHEMA_PATH, 'r', encoding='utf-8') as schema_file:
+            conn.executescript(schema_file.read())
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def validate_database_schema() -> None:
+    """Raise if the expected telemetry table is missing."""
+    conn = create_db_connection(use_row_factory=False)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='bms_telemetry'"
+        )
+        if not cursor.fetchone():
+            raise RuntimeError(
+                f"bms_telemetry table not found in database: {DATABASE_PATH}"
+            )
+    finally:
+        conn.close()
+
 
 def resolve_bucket_seconds(hours: float, resolution: str = 'auto', target_points: int = 300) -> int:
     """Resolve requested resolution into a bucket size in seconds."""
@@ -69,6 +128,34 @@ def _fetch_raw_data(hours: float, bms_id: Optional[str] = None) -> List[Dict]:
         conn.close()
 
 
+def _fetch_dashboard_raw_data(hours: float, bms_id: Optional[str] = None) -> List[Dict]:
+    """Get raw dashboard telemetry data with only chart-required columns."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
+
+        if bms_id:
+            cursor.execute(f"""
+                SELECT {DASHBOARD_VIEW_COLUMN_SQL}
+                FROM bms_telemetry
+                WHERE timestamp >= ? AND bms_id = ?
+                ORDER BY timestamp ASC
+            """, (cutoff_time, bms_id))
+        else:
+            cursor.execute(f"""
+                SELECT {DASHBOARD_VIEW_COLUMN_SQL}
+                FROM bms_telemetry
+                WHERE timestamp >= ?
+                ORDER BY timestamp ASC
+            """, (cutoff_time,))
+
+        rows = cursor.fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
+
+
 def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[str] = None) -> List[Dict]:
     """Get bucketed telemetry data where each row is an aggregated time bucket."""
     conn = get_db_connection()
@@ -90,9 +177,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
                     AVG(cells_v_4) AS cells_v_4,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
-                    AVG(temps_c_3) AS temps_c_3,
-                    MIN(min_temp_c) AS min_temp_c,
-                    MAX(max_temp_c) AS max_temp_c
+                    AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
                 WHERE timestamp >= ? AND bms_id = ?
                 GROUP BY CAST((timestamp / ?) AS INTEGER)
@@ -112,9 +197,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
                     AVG(cells_v_4) AS cells_v_4,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
-                    AVG(temps_c_3) AS temps_c_3,
-                    MIN(min_temp_c) AS min_temp_c,
-                    MAX(max_temp_c) AS max_temp_c
+                    AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
                 WHERE timestamp >= ?
                 GROUP BY CAST((timestamp / ?) AS INTEGER)
@@ -140,7 +223,7 @@ def get_telemetry_data_for_view(
     if is_aggregated:
         data = _fetch_aggregated_data(hours, bucket_seconds, bms_id)
     else:
-        data = _fetch_raw_data(hours, bms_id)
+        data = _fetch_dashboard_raw_data(hours, bms_id)
 
     metadata = {
         'resolution': resolution,
@@ -162,7 +245,7 @@ def get_latest_point_for_view(
     """Get the latest point for a client view (raw or aggregated)."""
     bucket_seconds = resolve_bucket_seconds(hours, resolution, target_points)
     if bucket_seconds <= 10:
-        return get_latest_reading(bms_id)
+        return get_latest_dashboard_point(bms_id)
     cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
 
     conn = get_db_connection()
@@ -203,9 +286,7 @@ def get_latest_point_for_view(
                     AVG(cells_v_4) AS cells_v_4,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
-                    AVG(temps_c_3) AS temps_c_3,
-                    MIN(min_temp_c) AS min_temp_c,
-                    MAX(max_temp_c) AS max_temp_c
+                    AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
                 WHERE timestamp >= ? AND timestamp < ? AND bms_id = ?
             """, (bucket_start, bucket_start, bucket_end, bms_id))
@@ -223,9 +304,7 @@ def get_latest_point_for_view(
                     AVG(cells_v_4) AS cells_v_4,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
-                    AVG(temps_c_3) AS temps_c_3,
-                    MIN(min_temp_c) AS min_temp_c,
-                    MAX(max_temp_c) AS max_temp_c
+                    AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
                 WHERE timestamp >= ? AND timestamp < ?
             """, (bucket_start, bucket_start, bucket_end))
@@ -244,19 +323,7 @@ def get_latest_point_for_view(
 def get_db_connection():
     """Get database connection"""
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
-        conn.row_factory = sqlite3.Row
-        # Test the connection
-        cursor = conn.cursor()
-        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='bms_telemetry'")
-        table_exists = cursor.fetchone()
-        if not table_exists:
-            print(f"ERROR: bms_telemetry table not found in database: {DATABASE_PATH}")
-            # List available tables for debugging
-            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
-            tables = cursor.fetchall()
-            print(f"Available tables: {[t[0] for t in tables]}")
-        return conn
+        return create_db_connection()
     except Exception as e:
         print(f"Database connection error: {e}")
         print(f"Database path: {DATABASE_PATH}")
@@ -279,6 +346,69 @@ def get_latest_reading(bms_id: Optional[str] = None) -> Optional[Dict]:
             cursor.execute("""
                 SELECT * FROM bms_telemetry 
                 ORDER BY timestamp DESC 
+                LIMIT 1
+            """)
+        row = cursor.fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_latest_timestamp(bms_id: Optional[str] = None) -> Optional[int]:
+    """Get the most recent telemetry timestamp."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        if bms_id:
+            cursor.execute("""
+                SELECT MAX(timestamp) AS latest_timestamp
+                FROM bms_telemetry
+                WHERE bms_id = ?
+            """, (bms_id,))
+        else:
+            cursor.execute("""
+                SELECT MAX(timestamp) AS latest_timestamp
+                FROM bms_telemetry
+            """)
+        row = cursor.fetchone()
+        return row['latest_timestamp'] if row else None
+    finally:
+        conn.close()
+
+
+def get_latest_record_id() -> Optional[int]:
+    """Get the most recent telemetry record id."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT MAX(id) AS latest_id
+            FROM bms_telemetry
+        """)
+        row = cursor.fetchone()
+        return row['latest_id'] if row else None
+    finally:
+        conn.close()
+
+
+def get_latest_dashboard_point(bms_id: Optional[str] = None) -> Optional[Dict]:
+    """Get the latest telemetry row with only dashboard-view columns."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        if bms_id:
+            cursor.execute(f"""
+                SELECT {DASHBOARD_VIEW_COLUMN_SQL}
+                FROM bms_telemetry
+                WHERE bms_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, (bms_id,))
+        else:
+            cursor.execute(f"""
+                SELECT {DASHBOARD_VIEW_COLUMN_SQL}
+                FROM bms_telemetry
+                ORDER BY timestamp DESC
                 LIMIT 1
             """)
         row = cursor.fetchone()

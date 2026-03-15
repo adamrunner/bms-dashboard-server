@@ -35,4 +35,5 @@ CREATE TABLE IF NOT EXISTS bms_telemetry (
 
 CREATE INDEX IF NOT EXISTS idx_bms_id ON bms_telemetry(bms_id);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON bms_telemetry(timestamp);
+CREATE INDEX IF NOT EXISTS idx_bms_id_timestamp ON bms_telemetry(bms_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_created_at ON bms_telemetry(created_at);

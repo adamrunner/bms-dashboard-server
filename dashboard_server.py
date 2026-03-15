@@ -6,19 +6,49 @@ Flask application with WebSocket support for real-time telemetry display
 
 import sys
 import time
+import os
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 from database_queries import (
     get_latest_reading, get_statistics, get_data_count, get_available_bms_ids,
-    get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds
+    get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds,
+    ensure_database_schema, validate_database_schema, get_latest_record_id
 )
 
+DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
+
+
+def get_app_env() -> str:
+    """Return the current application environment name."""
+    return os.getenv('APP_ENV', 'development').strip().lower()
+
+
+def is_development_env() -> bool:
+    """Return True when running in development mode."""
+    return get_app_env() in DEVELOPMENT_ENV_NAMES
+
+
+def resolve_flask_secret_key() -> str:
+    """Resolve the Flask secret key with explicit development behavior."""
+    secret_key = os.getenv('FLASK_SECRET_KEY')
+    if secret_key:
+        return secret_key
+
+    if is_development_env():
+        print("FLASK_SECRET_KEY not set; using development-only fallback secret key")
+        return 'dev-dashboard-secret-key'
+
+    raise RuntimeError(
+        "FLASK_SECRET_KEY must be set when APP_ENV is not development"
+    )
+
+
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+app.config['SECRET_KEY'] = resolve_flask_secret_key()
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Global variables for real-time monitoring
-last_data_count = 0
+last_seen_record_id = None
 monitoring_thread = None
 monitoring_active = False
 connected_clients = set()
@@ -65,21 +95,28 @@ def normalize_view_config(data=None):
 
 def background_monitor():
     """Background thread to monitor database for new data"""
-    global last_data_count, monitoring_active, last_stats_update
+    global last_seen_record_id, monitoring_active, last_stats_update
     
-    print(f"Background monitor started, initial count: {last_data_count}")
+    print(f"Background monitor started, initial record id: {last_seen_record_id}")
     
     while monitoring_active:
         try:
+            if not connected_clients:
+                print("No connected clients remaining, stopping background monitor")
+                monitoring_active = False
+                break
+
             current_time = int(time.time())
-            current_count = get_data_count()
-            
-            if current_count > last_data_count:
-                print(f"New data detected! Count: {last_data_count} -> {current_count}")
-                
-                latest = get_latest_reading()
-                if latest and connected_clients:
-                    print(f"Broadcasting view-aware telemetry updates for timestamp: {latest['timestamp']}")
+            current_latest_record_id = get_latest_record_id()
+
+            if current_latest_record_id and current_latest_record_id != last_seen_record_id:
+                print(
+                    "New data detected! "
+                    f"Record ID: {last_seen_record_id} -> {current_latest_record_id}"
+                )
+
+                if connected_clients:
+                    print("Broadcasting view-aware telemetry updates")
                     try:
                         for sid in list(connected_clients):
                             view_cfg = client_view_config.get(sid, DEFAULT_VIEW_CONFIG)
@@ -111,10 +148,7 @@ def background_monitor():
                         print(f"WebSocket emit failed: {emit_error}")
                         import traceback
                         traceback.print_exc()
-                else:
-                    print("No latest reading found or no connected clients")
-                
-                last_data_count = current_count
+                last_seen_record_id = current_latest_record_id
             
             # Update statistics every 60 seconds
             if current_time - last_stats_update >= 60:
@@ -214,6 +248,7 @@ def api_health():
     """Health check endpoint"""
     bms_id = request.args.get('bms_id', default=None, type=str)
     try:
+        validate_database_schema()
         count = get_data_count(bms_id)
         latest = get_latest_reading(bms_id)
         
@@ -274,7 +309,7 @@ def test_websocket():
 @socketio.on('connect')
 def handle_connect(auth):
     """Handle client connection"""
-    global monitoring_active, monitoring_thread, connected_clients
+    global monitoring_active, monitoring_thread, connected_clients, last_seen_record_id
     
     print(f'Client connected: {request.sid}')
     sid = request.sid
@@ -285,45 +320,33 @@ def handle_connect(auth):
     # Start monitoring thread if not already running
     if not monitoring_active:
         print("Starting background monitoring thread...")
+        last_seen_record_id = get_latest_record_id()
         monitoring_active = True
         # Use Flask-SocketIO's background task instead of threading
         socketio.start_background_task(background_monitor)
     else:
         print("Background monitoring thread already running")
     
-    # Send initial data to the newly connected client
     try:
-        print("Sending initial data to client...")
-        view_cfg = client_view_config[sid]
-        records, meta = get_telemetry_data_for_view(
-            view_cfg['hours'],
-            view_cfg['bms_id'],
-            view_cfg['resolution'],
-            view_cfg['target_points']
-        )
-        emit('initial_data', {'records': records, 'meta': meta})
-        print(f"Sent {len(records)} initial records")
-        
         stats = get_statistics(24)
         emit('statistics', stats)
         print("Sent statistics")
-        
     except Exception as e:
-        print(f"Error sending initial data: {e}")
-        import traceback
-        traceback.print_exc()
-        emit('error', {'message': 'Failed to load initial data'})
+        print(f"Error sending initial statistics: {e}")
+        emit('error', {'message': 'Failed to load initial statistics'})
 
 
 @socketio.on('disconnect')
 def handle_disconnect():
     """Handle client disconnection"""
-    global connected_clients
+    global connected_clients, monitoring_active
     
     print(f'Client disconnected: {request.sid}')
     connected_clients.discard(request.sid)
     client_view_config.pop(request.sid, None)
     print(f"Total connected clients: {len(connected_clients)}")
+    if not connected_clients:
+        monitoring_active = False
 
 
 @socketio.on('test_message')
@@ -397,15 +420,17 @@ def internal_error(error):
 
 def initialize_monitoring():
     """Initialize the monitoring system"""
-    global last_data_count, last_stats_update
+    global last_seen_record_id, last_stats_update
     
     try:
-        last_data_count = get_data_count()
+        ensure_database_schema()
+        validate_database_schema()
+        last_seen_record_id = get_latest_record_id()
         last_stats_update = int(time.time())  # Initialize stats timer
-        print(f"Monitoring initialized with {last_data_count} existing records")
+        print(f"Monitoring initialized with latest record id {last_seen_record_id}")
     except Exception as e:
         print(f"Error initializing monitoring: {e}")
-        last_data_count = 0
+        last_seen_record_id = None
         last_stats_update = int(time.time())
 
 
