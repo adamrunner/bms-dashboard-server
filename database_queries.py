@@ -11,14 +11,18 @@ from typing import List, Dict, Optional, Tuple
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
 
-ALLOWED_BUCKET_SECONDS = [10, 30, 60, 180, 300]
+ALLOWED_BUCKET_SECONDS = [10, 30, 60, 180, 300, 600, 900, 1800]
 RESOLUTION_SECONDS_MAP = {
     '10s': 10,
     '30s': 30,
     '1m': 60,
     '3m': 180,
-    '5m': 300
+    '5m': 300,
+    '10m': 600,
+    '15m': 900,
+    '30m': 1800
 }
+AUTO_RAW_MAX_HOURS = 0.167
 
 SCHEMA_PATH = os.path.join(os.path.dirname(__file__), 'bms_schema.sql')
 DASHBOARD_VIEW_COLUMNS = [
@@ -94,12 +98,19 @@ def resolve_bucket_seconds(hours: float, resolution: str = 'auto', target_points
         if hours <= 1:
             return 60
         if hours <= 6:
-            return 180
-        return 300
+            return 600
+        return 1800
 
     # Fallback: compute from target points and snap to nearest supported bucket.
     ideal = max(10, int(math.ceil((hours * 3600.0) / max(50, target_points))))
     return min(ALLOWED_BUCKET_SECONDS, key=lambda value: abs(value - ideal))
+
+
+def should_aggregate_view(hours: float, resolution: str, bucket_seconds: int) -> bool:
+    """Return True when a dashboard view should be bucketed before rendering."""
+    if resolution in RESOLUTION_SECONDS_MAP:
+        return True
+    return hours > AUTO_RAW_MAX_HOURS or bucket_seconds > 10
 
 
 def _fetch_raw_data(hours: float, bms_id: Optional[str] = None) -> List[Dict]:
@@ -167,6 +178,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
             cursor.execute("""
                 SELECT
                     CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
+                    COUNT(*) AS sample_count,
                     AVG(pack_voltage_v) AS pack_voltage_v,
                     AVG(pack_current_a) AS pack_current_a,
                     AVG(state_of_charge_pct) AS state_of_charge_pct,
@@ -187,6 +199,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
             cursor.execute("""
                 SELECT
                     CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
+                    COUNT(*) AS sample_count,
                     AVG(pack_voltage_v) AS pack_voltage_v,
                     AVG(pack_current_a) AS pack_current_a,
                     AVG(state_of_charge_pct) AS state_of_charge_pct,
@@ -218,18 +231,25 @@ def get_telemetry_data_for_view(
 ) -> Tuple[List[Dict], Dict]:
     """Get telemetry data and metadata for a dashboard view with optional bucketing."""
     bucket_seconds = resolve_bucket_seconds(hours, resolution, target_points)
-    is_aggregated = bucket_seconds > 10
+    is_aggregated = should_aggregate_view(hours, resolution, bucket_seconds)
 
     if is_aggregated:
         data = _fetch_aggregated_data(hours, bucket_seconds, bms_id)
     else:
         data = _fetch_dashboard_raw_data(hours, bms_id)
 
+    source_record_count = (
+        sum(row.get('sample_count') or 0 for row in data)
+        if is_aggregated
+        else len(data)
+    )
+
     metadata = {
         'resolution': resolution,
         'bucket_seconds': bucket_seconds,
         'is_aggregated': is_aggregated,
         'point_count': len(data),
+        'source_record_count': source_record_count,
         'hours': hours,
         'bms_id': bms_id
     }
@@ -244,7 +264,7 @@ def get_latest_point_for_view(
 ) -> Optional[Dict]:
     """Get the latest point for a client view (raw or aggregated)."""
     bucket_seconds = resolve_bucket_seconds(hours, resolution, target_points)
-    if bucket_seconds <= 10:
+    if not should_aggregate_view(hours, resolution, bucket_seconds):
         return get_latest_dashboard_point(bms_id)
     cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
 
@@ -276,6 +296,7 @@ def get_latest_point_for_view(
             cursor.execute("""
                 SELECT
                     ? AS timestamp,
+                    COUNT(*) AS sample_count,
                     AVG(pack_voltage_v) AS pack_voltage_v,
                     AVG(pack_current_a) AS pack_current_a,
                     AVG(state_of_charge_pct) AS state_of_charge_pct,
@@ -294,6 +315,7 @@ def get_latest_point_for_view(
             cursor.execute("""
                 SELECT
                     ? AS timestamp,
+                    COUNT(*) AS sample_count,
                     AVG(pack_voltage_v) AS pack_voltage_v,
                     AVG(pack_current_a) AS pack_current_a,
                     AVG(state_of_charge_pct) AS state_of_charge_pct,

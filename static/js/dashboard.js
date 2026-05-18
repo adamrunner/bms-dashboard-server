@@ -11,7 +11,7 @@ let latestDataRequestId = 0;
 let fetchStatusTimer = null;
 let bmsSelectionReady = false;
 
-const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m'];
+const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m', '10m', '15m', '30m'];
 const CHART_DATA_FIELDS = {
     pack: ['pack_voltage_v', 'pack_current_a'],
     soc: ['state_of_charge_pct'],
@@ -221,7 +221,11 @@ function updateResolutionAndPointInfo(meta = {}) {
         : `${effectiveSeconds / 60}m`;
 
     resolutionInfo.textContent = `Resolution: ${resolutionLabel} ${meta.is_aggregated ? '(aggregated)' : '(raw)'}`;
-    pointInfo.textContent = `Points: ${meta.point_count || 0}`;
+    if (meta.is_aggregated && meta.source_record_count) {
+        pointInfo.textContent = `Points: ${meta.point_count || 0} from ${meta.source_record_count} records`;
+    } else {
+        pointInfo.textContent = `Points: ${meta.point_count || 0}`;
+    }
 }
 
 function setFetchStatus(message, level = 'warning', autoHideMs = 5000) {
@@ -709,7 +713,7 @@ function updateChartsWithNewData(data, meta = {}) {
         currentBucketSeconds = meta.bucket_seconds;
     }
 
-    const replaceLastPoint = (meta.bucket_seconds || currentBucketSeconds) > 10;
+    const replaceLastPoint = Boolean(meta.is_aggregated);
 
     Object.keys(CHART_DATA_FIELDS).forEach(chartKey => {
         appendPointToChartSeries(chartKey, timestamp, data, replaceLastPoint);
@@ -726,7 +730,7 @@ function updateChartsWithNewData(data, meta = {}) {
     const pointCount = charts.pack.data.datasets[0].data.length;
     updateResolutionAndPointInfo({
         bucket_seconds: currentBucketSeconds,
-        is_aggregated: currentBucketSeconds > 10,
+        is_aggregated: Boolean(meta.is_aggregated),
         point_count: pointCount
     });
 }

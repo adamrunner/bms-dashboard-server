@@ -12,7 +12,8 @@ from flask_socketio import SocketIO, emit
 from database_queries import (
     get_latest_reading, get_statistics, get_data_count, get_available_bms_ids,
     get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds,
-    ensure_database_schema, validate_database_schema, get_latest_record_id
+    should_aggregate_view, ensure_database_schema, validate_database_schema,
+    get_latest_record_id
 )
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
@@ -76,7 +77,7 @@ def normalize_view_config(data=None):
         bms_id = None
 
     resolution = payload.get('resolution', DEFAULT_VIEW_CONFIG['resolution']) or 'auto'
-    if resolution not in ['auto', '10s', '30s', '1m', '3m', '5m']:
+    if resolution not in ['auto', '10s', '30s', '1m', '3m', '5m', '10m', '15m', '30m']:
         resolution = 'auto'
 
     try:
@@ -140,7 +141,11 @@ def background_monitor():
                                 'point': latest_point,
                                 'meta': {
                                     'bucket_seconds': bucket_seconds,
-                                    'is_aggregated': bucket_seconds > 10,
+                                    'is_aggregated': should_aggregate_view(
+                                        view_cfg['hours'],
+                                        view_cfg['resolution'],
+                                        bucket_seconds
+                                    ),
                                     'resolution': view_cfg['resolution']
                                 }
                             }, room=sid)

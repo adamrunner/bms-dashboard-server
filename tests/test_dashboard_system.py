@@ -87,15 +87,18 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(database_queries.resolve_bucket_seconds(0.017), 10)
         self.assertEqual(database_queries.resolve_bucket_seconds(0.5), 30)
         self.assertEqual(database_queries.resolve_bucket_seconds(1), 60)
-        self.assertEqual(database_queries.resolve_bucket_seconds(6), 180)
-        self.assertEqual(database_queries.resolve_bucket_seconds(24), 300)
+        self.assertEqual(database_queries.resolve_bucket_seconds(6), 600)
+        self.assertEqual(database_queries.resolve_bucket_seconds(24), 1800)
+        self.assertEqual(database_queries.resolve_bucket_seconds(24, "10m"), 600)
+        self.assertEqual(database_queries.resolve_bucket_seconds(24, "15m"), 900)
+        self.assertEqual(database_queries.resolve_bucket_seconds(24, "30m"), 1800)
 
     def test_view_queries_return_reduced_payload(self):
         now = int(time.time())
         bms_mqtt_logger.insert_telemetry_data(build_payload("bms-a", now))
 
-        records, meta = database_queries.get_telemetry_data_for_view(1, "bms-a", "10s", 300)
-        latest_point = database_queries.get_latest_point_for_view(1, "bms-a", "10s", 300)
+        records, meta = database_queries.get_telemetry_data_for_view(0.017, "bms-a", "auto", 300)
+        latest_point = database_queries.get_latest_point_for_view(0.017, "bms-a", "auto", 300)
         latest_full = database_queries.get_latest_reading("bms-a")
 
         expected_keys = {
@@ -124,7 +127,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         bms_mqtt_logger.insert_telemetry_data(build_payload("bms-api", now, pack_voltage=13.4))
 
         client = dashboard_server.app.test_client()
-        response = client.get("/api/data?hours=1&bms_id=bms-api&resolution=10s")
+        response = client.get("/api/data?hours=0.017&bms_id=bms-api&resolution=auto")
 
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
@@ -132,6 +135,60 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertNotIn("bms_id", payload["records"][0])
         self.assertNotIn("created_at", payload["records"][0])
         self.assertEqual(payload["records"][0]["pack_voltage_v"], 13.4)
+
+    def test_auto_view_aggregates_thirty_minute_range(self):
+        now = int(time.time())
+        bucket_start = (now - 60) - ((now - 60) % 30)
+        for offset, voltage in enumerate([13.0, 13.2, 13.4, 13.6]):
+            bms_mqtt_logger.insert_telemetry_data(
+                build_payload("bms-aggregate", bucket_start + offset * 2, pack_voltage=voltage)
+            )
+
+        records, meta = database_queries.get_telemetry_data_for_view(
+            0.5,
+            "bms-aggregate",
+            "auto",
+            300
+        )
+
+        self.assertTrue(meta["is_aggregated"])
+        self.assertEqual(meta["bucket_seconds"], 30)
+        self.assertEqual(meta["point_count"], 1)
+        self.assertEqual(meta["source_record_count"], 4)
+        self.assertEqual(records[0]["sample_count"], 4)
+        self.assertAlmostEqual(records[0]["pack_voltage_v"], 13.3)
+
+    def test_explicit_ten_second_resolution_buckets_rows(self):
+        now = int(time.time())
+        bucket_start = (now - 60) - ((now - 60) % 10)
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("bms-10s", bucket_start, pack_voltage=12.8)
+        )
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("bms-10s", bucket_start + 2, pack_voltage=13.2)
+        )
+
+        records, meta = database_queries.get_telemetry_data_for_view(
+            1,
+            "bms-10s",
+            "10s",
+            300
+        )
+        latest_point = database_queries.get_latest_point_for_view(
+            1,
+            "bms-10s",
+            "10s",
+            300
+        )
+
+        self.assertTrue(meta["is_aggregated"])
+        self.assertEqual(meta["bucket_seconds"], 10)
+        self.assertEqual(meta["point_count"], 1)
+        self.assertEqual(meta["source_record_count"], 2)
+        self.assertEqual(records[0]["sample_count"], 2)
+        self.assertAlmostEqual(records[0]["pack_voltage_v"], 13.0)
+        self.assertEqual(latest_point["sample_count"], 2)
+        self.assertAlmostEqual(latest_point["pack_voltage_v"], 13.0)
 
     def test_socketio_set_view_returns_snapshot_data(self):
         now = int(time.time())
