@@ -13,7 +13,8 @@ let bmsSelectionReady = false;
 
 const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m', '10m', '15m', '30m'];
 const CHART_DATA_FIELDS = {
-    pack: ['pack_voltage_v', 'pack_current_a'],
+    voltage: ['pack_voltage_v'],
+    current: ['pack_current_a'],
     soc: ['state_of_charge_pct'],
     cell: ['cells_v_1', 'cells_v_2', 'cells_v_3', 'cells_v_4'],
     temp: ['temps_c_1', 'temps_c_2', 'temps_c_3'],
@@ -323,26 +324,16 @@ function sendViewSubscription() {
 
 // Initialize all charts
 function initializeCharts() {
-    const packCtx = document.getElementById('packChart').getContext('2d');
-    charts.pack = new Chart(packCtx, {
+    const voltageCtx = document.getElementById('voltageChart').getContext('2d');
+    charts.voltage = new Chart(voltageCtx, {
         ...chartConfig,
         data: {
-            datasets: [
-                {
-                    label: 'Pack Voltage (V)',
-                    borderColor: '#007bff',
-                    backgroundColor: 'rgba(0,123,255,0.1)',
-                    yAxisID: 'y',
-                    data: []
-                },
-                {
-                    label: 'Current (A)',
-                    borderColor: '#28a745',
-                    backgroundColor: 'rgba(40,167,69,0.1)',
-                    yAxisID: 'y1',
-                    data: []
-                }
-            ]
+            datasets: [{
+                label: 'Pack Voltage (V)',
+                borderColor: '#007bff',
+                backgroundColor: 'rgba(0,123,255,0.1)',
+                data: []
+            }]
         },
         options: {
             ...chartConfig.options,
@@ -350,14 +341,30 @@ function initializeCharts() {
                 ...chartConfig.options.scales,
                 y: {
                     ...chartConfig.options.scales.y,
-                    title: { display: true, text: 'Voltage (V)' },
-                    position: 'left'
-                },
-                y1: {
-                    type: 'linear',
-                    title: { display: true, text: 'Current (A)' },
-                    position: 'right',
-                    grid: { drawOnChartArea: false }
+                    title: { display: true, text: 'Voltage (V)' }
+                }
+            }
+        }
+    });
+
+    const currentCtx = document.getElementById('currentChart').getContext('2d');
+    charts.current = new Chart(currentCtx, {
+        ...chartConfig,
+        data: {
+            datasets: [{
+                label: 'Current (A)',
+                borderColor: '#28a745',
+                backgroundColor: 'rgba(40,167,69,0.1)',
+                data: []
+            }]
+        },
+        options: {
+            ...chartConfig.options,
+            scales: {
+                ...chartConfig.options.scales,
+                y: {
+                    ...chartConfig.options.scales.y,
+                    title: { display: true, text: 'Current (A)' }
                 }
             }
         }
@@ -727,7 +734,7 @@ function updateChartsWithNewData(data, meta = {}) {
         chart.update('active');
     });
 
-    const pointCount = charts.pack.data.datasets[0].data.length;
+    const pointCount = charts.voltage.data.datasets[0].data.length;
     updateResolutionAndPointInfo({
         bucket_seconds: currentBucketSeconds,
         is_aggregated: Boolean(meta.is_aggregated),
