@@ -35,6 +35,7 @@ DASHBOARD_VIEW_COLUMNS = [
     'cells_v_2',
     'cells_v_3',
     'cells_v_4',
+    'cell_voltage_delta_v',
     'temps_c_1',
     'temps_c_2',
     'temps_c_3'
@@ -187,6 +188,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
                     AVG(cells_v_2) AS cells_v_2,
                     AVG(cells_v_3) AS cells_v_3,
                     AVG(cells_v_4) AS cells_v_4,
+                    AVG(cell_voltage_delta_v) AS cell_voltage_delta_v,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3
@@ -208,6 +210,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
                     AVG(cells_v_2) AS cells_v_2,
                     AVG(cells_v_3) AS cells_v_3,
                     AVG(cells_v_4) AS cells_v_4,
+                    AVG(cell_voltage_delta_v) AS cell_voltage_delta_v,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3

@@ -18,6 +18,7 @@ const CHART_DATA_FIELDS = {
     soc: ['state_of_charge_pct'],
     cell: ['cells_v_1', 'cells_v_2', 'cells_v_3', 'cells_v_4'],
     temp: ['temps_c_1', 'temps_c_2', 'temps_c_3'],
+    cellDelta: ['cell_voltage_delta_v'],
     power: ['power_w']
 };
 
@@ -435,6 +436,29 @@ function initializeCharts() {
                 y: {
                     ...chartConfig.options.scales.y,
                     title: { display: true, text: 'Temperature (°C)' }
+                }
+            }
+        }
+    });
+
+    const cellDeltaCtx = document.getElementById('cellDeltaChart').getContext('2d');
+    charts.cellDelta = new Chart(cellDeltaCtx, {
+        ...chartConfig,
+        data: {
+            datasets: [{
+                label: 'Cell Delta (V)',
+                borderColor: '#6f42c1',
+                backgroundColor: 'rgba(111,66,193,0.1)',
+                data: []
+            }]
+        },
+        options: {
+            ...chartConfig.options,
+            scales: {
+                ...chartConfig.options.scales,
+                y: {
+                    ...chartConfig.options.scales.y,
+                    title: { display: true, text: 'Delta (V)' }
                 }
             }
         }

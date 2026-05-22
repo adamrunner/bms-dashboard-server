@@ -92,7 +92,7 @@ services:
           "CMD",
           "python",
           "-c",
-          "import requests; requests.get('http://localhost:5000/api/health', timeout=5)",
+          "from urllib.request import urlopen; urlopen('http://localhost:5000/api/health', timeout=5).read()",
         ]
       interval: 30s
       timeout: 10s
