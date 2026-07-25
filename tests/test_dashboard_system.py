@@ -16,6 +16,15 @@ def build_payload(bms_id: str, timestamp: int, pack_voltage: float = 13.1) -> st
     )
 
 
+def build_gateway_simulator_payload(bms_id: str, timestamp: int) -> str:
+    """Match esp32-sim7670g: 23 fixed fields, four cells, two temperatures."""
+    return (
+        f"{bms_id},{timestamp},1,00:00:01,1.0,13.2,-3.8,87,-50.2,"
+        "100,4,53,4,3.295,1,3.305,4,0.010,2,21.9,25.4,1,1,"
+        "3.300,3.301,3.299,3.302,22.0,25.3"
+    )
+
+
 class DashboardSystemTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -47,6 +56,41 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertFalse(bms_mqtt_logger.convert_value("0", "discharging_enabled"))
         self.assertEqual(bms_mqtt_logger.convert_value("42.9", "timestamp"), 42)
         self.assertEqual(bms_mqtt_logger.convert_value("3.14", "pack_voltage_v"), 3.14)
+
+    def test_gateway_simulator_row_pads_missing_temperature(self):
+        now = int(time.time())
+        payload = build_gateway_simulator_payload("gw-simulator", now)
+
+        self.assertEqual(len(payload.split(",")), 29)
+        bms_mqtt_logger.insert_telemetry_data(payload)
+
+        latest = database_queries.get_latest_reading("gw-simulator")
+        self.assertEqual(latest["cell_count"], 4)
+        self.assertEqual(latest["temp_count"], 2)
+        self.assertEqual(latest["cells_v_4"], 3.302)
+        self.assertEqual(latest["temps_c_1"], 22.0)
+        self.assertEqual(latest["temps_c_2"], 25.3)
+        self.assertIsNone(latest["temps_c_3"])
+
+    def test_variable_width_row_rejects_count_mismatch(self):
+        now = int(time.time())
+        payload = build_gateway_simulator_payload("gw-mismatch", now)
+        fields = payload.split(",")
+        fields[18] = "3"
+
+        bms_mqtt_logger.insert_telemetry_data(",".join(fields))
+
+        self.assertIsNone(database_queries.get_latest_reading("gw-mismatch"))
+
+    def test_variable_width_row_rejects_unsupported_sensor_count(self):
+        now = int(time.time())
+        payload = build_gateway_simulator_payload("gw-too-many-cells", now)
+        fields = payload.split(",")
+        fields[12] = "5"
+
+        bms_mqtt_logger.insert_telemetry_data(",".join(fields))
+
+        self.assertIsNone(database_queries.get_latest_reading("gw-too-many-cells"))
 
     def test_secret_and_mqtt_config_use_development_fallbacks(self):
         with mock.patch.dict('os.environ', {'APP_ENV': 'development'}, clear=False):
@@ -107,6 +151,7 @@ class DashboardSystemTestCase(unittest.TestCase):
             "pack_current_a",
             "state_of_charge_pct",
             "power_w",
+            "cell_voltage_delta_v",
             "cells_v_1",
             "cells_v_2",
             "cells_v_3",

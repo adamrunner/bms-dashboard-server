@@ -61,7 +61,8 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 ### 1. MQTT Data Flow
 - **BMS devices** → publish CSV telemetry data → **MQTT broker** (Eclipse Mosquitto)
 - **MQTT Logger** (`bms_mqtt_logger.py`) → subscribes to `bms/telemetry/+` topic → parses CSV → stores in SQLite
-- Data format: CSV without headers, 29 columns of battery telemetry (voltage, current, temperature, SoC, etc.)
+- Data format: CSV without headers, with 23 fixed columns followed by the
+  declared number of cell-voltage and temperature values.
 
 ### 2. Web Dashboard 
 - **Flask application** (`dashboard_server.py`) with Flask-SocketIO for real-time updates
@@ -84,7 +85,8 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 - `DASHBOARD_PORT`: Web dashboard port (default: 5000)
 
 ### MQTT Message Format
-The system expects CSV data with exactly 29 columns in this order:
+The system accepts variable-width gateway CSV data and normalizes it into this
+four-cell/three-temperature commissioning schema:
 1. `timestamp` (Unix timestamp)
 2. `elapsed_seconds`, `elapsed_hms`, `total_energy_wh`
 3. `pack_voltage_v`, `pack_current_a`, `state_of_charge_pct`, `power_w`

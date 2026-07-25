@@ -27,6 +27,10 @@ EXPECTED_COLUMNS = [
     'cells_v_3', 'cells_v_4', 'temps_c_1', 'temps_c_2', 'temps_c_3'
 ]
 
+FIXED_COLUMN_COUNT = 23
+MAX_CELL_COUNT = 4
+MAX_TEMP_COUNT = 3
+
 # Setup logging
 logging.basicConfig(
     level=logging.DEBUG,
@@ -134,6 +138,48 @@ def convert_value(value, column_name):
         return None
 
 
+def normalize_telemetry_row(row):
+    """Pad a variable-width gateway row to the commissioning DB schema."""
+    if len(row) < FIXED_COLUMN_COUNT:
+        raise ValueError(
+            f"row has {len(row)} columns; expected at least {FIXED_COLUMN_COUNT}"
+        )
+
+    try:
+        cell_count = int(row[12])
+        temp_count = int(row[18])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("cell_count and temp_count must be integers") from exc
+
+    if not 0 <= cell_count <= MAX_CELL_COUNT:
+        raise ValueError(
+            f"cell_count {cell_count} exceeds supported range 0..{MAX_CELL_COUNT}"
+        )
+    if not 0 <= temp_count <= MAX_TEMP_COUNT:
+        raise ValueError(
+            f"temp_count {temp_count} exceeds supported range 0..{MAX_TEMP_COUNT}"
+        )
+
+    expected_width = FIXED_COLUMN_COUNT + cell_count + temp_count
+    if len(row) != expected_width:
+        raise ValueError(
+            f"row has {len(row)} columns; counts require exactly {expected_width}"
+        )
+
+    cell_start = FIXED_COLUMN_COUNT
+    temp_start = cell_start + cell_count
+    cells = row[cell_start:temp_start]
+    temps = row[temp_start:]
+
+    return (
+        row[:FIXED_COLUMN_COUNT]
+        + cells
+        + [''] * (MAX_CELL_COUNT - cell_count)
+        + temps
+        + [''] * (MAX_TEMP_COUNT - temp_count)
+    )
+
+
 def insert_telemetry_data(csv_data):
     """Parse CSV data and insert into database"""
     conn = None
@@ -146,13 +192,15 @@ def insert_telemetry_data(csv_data):
         rows_to_insert = []
 
         for row in csv_reader:
-            if len(row) != len(EXPECTED_COLUMNS):
-                logger.warning(f"Row has {len(row)} columns, expected {len(EXPECTED_COLUMNS)}")
+            try:
+                normalized_row = normalize_telemetry_row(row)
+            except ValueError as exc:
+                logger.warning(f"Rejected telemetry row: {exc}")
                 continue
 
             rows_to_insert.append([
                 convert_value(value, EXPECTED_COLUMNS[i])
-                for i, value in enumerate(row)
+                for i, value in enumerate(normalized_row)
             ])
 
         if not rows_to_insert:

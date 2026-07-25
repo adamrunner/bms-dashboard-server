@@ -81,7 +81,13 @@ In `APP_ENV=development`, the dashboard and logger will log a warning and use de
 
 ### Data Format
 
-The system expects CSV telemetry data with 30 columns. The first column is the BMS identifier, followed by the telemetry payload:
+The system expects the gateway's variable-width CSV telemetry format. Every
+row starts with 23 fixed columns (including the BMS identifier), followed by
+`cell_count` cell voltages and `temp_count` temperatures. The commissioning
+SQLite schema stores up to four cells and three temperatures; missing values
+are padded with `NULL`, while larger or inconsistent rows are rejected.
+
+The normalized database column order is:
 
 1. `bms_id`
 2. `timestamp`

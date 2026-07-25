@@ -65,7 +65,11 @@ FLASK_DEBUG=false
 FLASK_SECRET_KEY=change-me     # required outside development
 ```
 
-Telemetry payloads published to `MQTT_TOPIC` must contain 30 CSV columns, starting with `bms_id` followed by the telemetry fields stored in `bms_telemetry`.
+Telemetry payloads published to `MQTT_TOPIC` use 23 fixed CSV columns starting
+with `bms_id`, followed by `cell_count` cell values and `temp_count`
+temperature values. The logger normalizes rows into the four-cell,
+three-temperature commissioning schema, padding missing values with `NULL` and
+rejecting inconsistent or larger rows.
 
 When `APP_ENV=development`, the Python services will log a warning and use development-only fallback values if `FLASK_SECRET_KEY` or MQTT credentials are omitted. In any other environment, those variables must be set explicitly or the services will fail to start.
 
