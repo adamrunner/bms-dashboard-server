@@ -8,6 +8,9 @@ services:
   mosquitto:
     image: eclipse-mosquitto:2.0.22
     container_name: mosquitto-broker
+    # Avoid the image's root entrypoint taking ownership of tracked bind-mount
+    # files. UID 1883 owns runtime secrets; GID 1000 can read project config.
+    user: "${MOSQUITTO_UID:-1883}:${APP_GID:-1000}"
     restart: unless-stopped
     ports:
       - "${MQTT_EXTERNAL_PORT:-1883}:1883"
