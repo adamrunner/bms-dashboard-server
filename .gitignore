@@ -150,6 +150,8 @@ bms_logger.log
 # Mosquitto data, passwords and logs
 mosquitto/config/passwd
 mosquitto/config/passwords
+mosquitto/config/certs/
+mosquitto/config/runtime.d/*.conf
 mosquitto/data/
 mosquitto/log/
 

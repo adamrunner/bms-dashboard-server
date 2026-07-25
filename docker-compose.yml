@@ -1,17 +1,23 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: "${DOCKER_LOG_MAX_SIZE:-10m}"
+    max-file: "${DOCKER_LOG_MAX_FILES:-5}"
+
 services:
   mosquitto:
-    image: eclipse-mosquitto:latest
+    image: eclipse-mosquitto:2.0.22
     container_name: mosquitto-broker
     restart: unless-stopped
     ports:
       - "${MQTT_EXTERNAL_PORT:-1883}:1883"
-      - "${MQTT_WEBSOCKET_PORT:-9001}:9001"
+      - "${MQTTS_EXTERNAL_PORT:-8883}:8883"
     volumes:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
-      - ./mosquitto/log:/mosquitto/log
     networks:
       - bms_network
+    logging: *default-logging
     healthcheck:
       test:
         [
@@ -47,10 +53,12 @@ services:
       MQTT_PASSWORD: ${MQTT_PASSWORD:-}
       MQTT_TOPIC: ${MQTT_TOPIC:-bms/telemetry/+}
       DATABASE_PATH: /app/data/bms_telemetry.db
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - .:/app/data
     networks:
       - bms_network
+    logging: *default-logging
     depends_on:
       - bms-dashboard
       - mosquitto
@@ -86,6 +94,7 @@ services:
       - .:/app/data
     networks:
       - bms_network
+    logging: *default-logging
     healthcheck:
       test:
         [

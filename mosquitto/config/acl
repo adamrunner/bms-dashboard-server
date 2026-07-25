@@ -1,0 +1,7 @@
+# Existing commissioning operator/logger account.
+user admin
+topic readwrite #
+
+# Device usernames must equal the final topic segment (their device_id).
+# Example: username gw-a1b2c3 may publish only bms/telemetry/gw-a1b2c3.
+pattern write bms/telemetry/%u

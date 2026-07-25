@@ -57,7 +57,7 @@ MQTT_TOPIC=bms/telemetry/+     # subscribe to bms/telemetry/<bms-id>
 
 # Mosquitto Service Configuration
 MQTT_EXTERNAL_PORT=1883        # External port for MQTT
-MQTT_WEBSOCKET_PORT=9001       # WebSocket port
+MQTTS_EXTERNAL_PORT=8883       # External port for MQTT over TLS
 
 # Dashboard Configuration
 DASHBOARD_PORT=5000
@@ -91,14 +91,40 @@ Then comment out or remove the `mosquitto` service from `docker-compose.yml`.
 
 The internal Mosquitto broker includes:
 - MQTT on port 1883
-- WebSocket support on port 9001
+- An optional runtime MQTTS listener on port 8883 after certificate setup
 - Authentication required (username/password)
 - Persistent message storage
+- Bounded Docker log rotation (10 MB x 5 files by default)
 
 To change the default admin password:
 ```bash
 ./mosquitto/config/create_users.sh
 ```
+
+### Anton MQTTS activation
+
+The tracked base configuration starts authenticated MQTT on port 1883 and
+loads optional runtime snippets from `mosquitto/config/runtime.d`. On `anton`,
+the root setup helper obtains a Let's Encrypt certificate with the existing
+Cloudflare updater token, protects that token in root-only files, installs the
+renewal hook, writes the ignored MQTTS runtime snippet, and recreates Mosquitto:
+
+```bash
+sudo /home/adamrunner/setup-anton-mqtts-root.sh you@example.com
+```
+
+Afterward, create a device account whose username exactly matches the gateway
+device ID. Password entry is interactive:
+
+```bash
+docker exec -it mosquitto-broker \
+  mosquitto_passwd /mosquitto/config/passwords/password_file gw-xxxxxx
+docker kill --signal=HUP mosquitto-broker
+```
+
+The tracked ACL permits that account to publish only
+`bms/telemetry/gw-xxxxxx`. The certificate, private key, generated runtime
+snippet, password file, and environment secrets remain ignored by Git.
 
 ## Docker Commands
 

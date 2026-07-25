@@ -72,7 +72,7 @@ FLASK_SECRET_KEY=change-me     # required outside development
 
 # Service Ports
 MQTT_EXTERNAL_PORT=1883        # MQTT port
-MQTT_WEBSOCKET_PORT=9001       # WebSocket port
+MQTTS_EXTERNAL_PORT=8883       # MQTT over TLS
 DASHBOARD_PORT=5000            # Web dashboard port
 FLASK_DEBUG=false
 ```
@@ -189,7 +189,8 @@ sqlite3 bms_telemetry.db
 All services include health checks and logging:
 
 - **Dashboard**: Available at http://localhost:5000
-- **MQTT Broker**: Ports 1883 (MQTT) and 9001 (WebSocket)
+- **MQTT Broker**: Internal/LAN port 1883 and public MQTTS port 8883 after
+  certificate setup
 - **Database**: SQLite with automatic schema creation
 - **Logs**: Available via `docker-compose logs`
 
