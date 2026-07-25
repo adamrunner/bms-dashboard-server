@@ -126,6 +126,13 @@ The tracked ACL permits that account to publish only
 `bms/telemetry/gw-xxxxxx`. The certificate, private key, generated runtime
 snippet, password file, and environment secrets remain ignored by Git.
 
+Before commissioning, switch the Python services out of development fallback
+mode and generate a private Flask secret without printing existing secrets:
+
+```bash
+/home/adamrunner/bms-dashboard-server/deploy/anton/set-production-env.sh
+```
+
 ## Docker Commands
 
 ### Start Services
