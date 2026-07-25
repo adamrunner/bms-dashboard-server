@@ -101,7 +101,7 @@ certbot certonly \
     --dns-cloudflare-propagation-seconds 30 \
     -d "$cert_name"
 
-install -d -o 1883 -g 1883 -m 0750 "$cert_dir" "$runtime_dir"
+install -d -o 1000 -g 1883 -m 0750 "$cert_dir" "$runtime_dir"
 install -m 0644 "/etc/letsencrypt/live/${cert_name}/fullchain.pem" \
     "${cert_dir}/fullchain.pem"
 install -o 1883 -g 1883 -m 0640 \
@@ -115,7 +115,7 @@ certfile /mosquitto/config/certs/fullchain.pem
 keyfile /mosquitto/config/certs/privkey.pem
 tls_version tlsv1.2
 EOF
-chown root:1883 "${runtime_dir}/50-mqtts.conf"
+chown 1000:1883 "${runtime_dir}/50-mqtts.conf"
 chmod 0640 "${runtime_dir}/50-mqtts.conf"
 
 install -d -m 0755 "$(dirname "$deploy_hook")"
