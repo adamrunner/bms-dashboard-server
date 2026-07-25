@@ -211,7 +211,10 @@ provision() {
     trap on_error ERR
 
     logger_password="$(openssl rand -hex 32)"
-    device_password="$(openssl rand -hex 32)"
+    # ESP32 firmware reserves one byte of its 64-byte password buffer for NUL.
+    # Keep generated device credentials comfortably below its 63-character
+    # input limit.
+    device_password="$(openssl rand -hex 24)"
 
     set_broker_password "$logger_username" "$logger_password"
     set_broker_password "$device_id" "$device_password"
