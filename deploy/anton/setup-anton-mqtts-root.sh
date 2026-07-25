@@ -114,9 +114,6 @@ protocol mqtt
 certfile /mosquitto/config/certs/fullchain.pem
 keyfile /mosquitto/config/certs/privkey.pem
 tls_version tlsv1.2
-password_file /mosquitto/config/passwords/password_file
-acl_file /mosquitto/config/acl
-allow_anonymous false
 EOF
 chown root:1883 "${runtime_dir}/50-mqtts.conf"
 chmod 0640 "${runtime_dir}/50-mqtts.conf"
