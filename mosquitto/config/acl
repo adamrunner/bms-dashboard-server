@@ -1,6 +1,16 @@
-# Existing commissioning operator/logger account.
+# Dedicated backend logger account. The deny rule takes precedence over the
+# device pattern below, keeping this account read-only.
+user bms-logger
+topic deny write bms/telemetry/bms-logger
+topic read bms/telemetry/+
+topic read $SYS/broker/uptime
+
+# Legacy account retained temporarily for esp32-bms-monitor migration.
+# deploy/anton/configure-mqtt-credentials.sh retire-admin removes its password
+# entry after all older clients have been reconfigured.
 user admin
 topic readwrite #
+topic read $SYS/broker/uptime
 
 # Device usernames must equal the final topic segment (their device_id).
 # Example: username gw-a1b2c3 may publish only bms/telemetry/gw-a1b2c3.
