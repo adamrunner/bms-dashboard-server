@@ -13,7 +13,7 @@ from database_queries import (
     get_latest_reading, get_statistics, get_data_count, get_available_bms_ids,
     get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds,
     should_aggregate_view, ensure_database_schema, validate_database_schema,
-    get_latest_record_id
+    get_latest_record_id, get_latest_device_status, get_latest_status_record_id
 )
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
@@ -50,6 +50,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 
 # Global variables for real-time monitoring
 last_seen_record_id = None
+last_seen_status_id = None
 monitoring_thread = None
 monitoring_active = False
 connected_clients = set()
@@ -96,7 +97,7 @@ def normalize_view_config(data=None):
 
 def background_monitor():
     """Background thread to monitor database for new data"""
-    global last_seen_record_id, monitoring_active, last_stats_update
+    global last_seen_record_id, last_seen_status_id, monitoring_active, last_stats_update
     
     print(f"Background monitor started, initial record id: {last_seen_record_id}")
     
@@ -109,6 +110,7 @@ def background_monitor():
 
             current_time = int(time.time())
             current_latest_record_id = get_latest_record_id()
+            current_latest_status_id = get_latest_status_record_id()
 
             if current_latest_record_id and current_latest_record_id != last_seen_record_id:
                 print(
@@ -154,6 +156,33 @@ def background_monitor():
                         import traceback
                         traceback.print_exc()
                 last_seen_record_id = current_latest_record_id
+
+            if (
+                current_latest_status_id
+                and current_latest_status_id != last_seen_status_id
+            ):
+                print(
+                    "New device status detected! "
+                    f"Record ID: {last_seen_status_id} -> {current_latest_status_id}"
+                )
+                for sid in list(connected_clients):
+                    view_cfg = client_view_config.get(sid, DEFAULT_VIEW_CONFIG)
+                    bms_filter = view_cfg.get('bms_id')
+                    if not bms_filter:
+                        continue
+                    latest_status = get_latest_device_status(bms_filter)
+                    if not latest_status:
+                        continue
+                    latest_status['received_age_seconds'] = max(
+                        0,
+                        current_time - latest_status['received_at']
+                    )
+                    socketio.server.emit(
+                        'device_status_update',
+                        latest_status,
+                        room=sid
+                    )
+                last_seen_status_id = current_latest_status_id
             
             # Update statistics every 60 seconds
             if current_time - last_stats_update >= 60:
@@ -245,6 +274,24 @@ def api_bms_ids():
         return jsonify(bms_ids)
     except Exception as e:
         print(f"Error fetching BMS IDs: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/device-status/latest')
+def api_latest_device_status():
+    """API endpoint to get the latest boot/OTA status for one device."""
+    bms_id = request.args.get('bms_id', default=None, type=str)
+    if not bms_id:
+        return jsonify({'error': 'bms_id is required'}), 400
+
+    try:
+        status = get_latest_device_status(bms_id)
+        if not status:
+            return jsonify({})
+        status['received_age_seconds'] = max(0, int(time.time()) - status['received_at'])
+        return jsonify(status)
+    except Exception as e:
+        print(f"Error fetching latest device status: {e}")
         return jsonify({'error': str(e)}), 500
 
 
@@ -425,17 +472,22 @@ def internal_error(error):
 
 def initialize_monitoring():
     """Initialize the monitoring system"""
-    global last_seen_record_id, last_stats_update
+    global last_seen_record_id, last_seen_status_id, last_stats_update
     
     try:
         ensure_database_schema()
         validate_database_schema()
         last_seen_record_id = get_latest_record_id()
+        last_seen_status_id = get_latest_status_record_id()
         last_stats_update = int(time.time())  # Initialize stats timer
-        print(f"Monitoring initialized with latest record id {last_seen_record_id}")
+        print(
+            "Monitoring initialized with latest telemetry/status record ids "
+            f"{last_seen_record_id}/{last_seen_status_id}"
+        )
     except Exception as e:
         print(f"Error initializing monitoring: {e}")
         last_seen_record_id = None
+        last_seen_status_id = None
         last_stats_update = int(time.time())
 
 

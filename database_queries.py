@@ -41,6 +41,23 @@ DASHBOARD_VIEW_COLUMNS = [
     'temps_c_3'
 ]
 DASHBOARD_VIEW_COLUMN_SQL = ', '.join(DASHBOARD_VIEW_COLUMNS)
+DEVICE_STATUS_VIEW_COLUMNS = [
+    'id',
+    'device_id',
+    'schema_version',
+    'firmware_version',
+    'ota_slot',
+    'pending_verify',
+    'boot_id',
+    'reset_reason',
+    'idf_version',
+    'build_date',
+    'build_time',
+    'reported_online',
+    'mqtt_retained',
+    'received_at'
+]
+DEVICE_STATUS_VIEW_COLUMN_SQL = ', '.join(DEVICE_STATUS_VIEW_COLUMNS)
 
 
 def create_db_connection(*, use_row_factory: bool = True) -> sqlite3.Connection:
@@ -70,17 +87,132 @@ def ensure_database_schema() -> None:
 
 
 def validate_database_schema() -> None:
-    """Raise if the expected telemetry table is missing."""
+    """Raise if an expected application table is missing."""
     conn = create_db_connection(use_row_factory=False)
     try:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name='bms_telemetry'"
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table'
+              AND name IN ('bms_telemetry', 'device_status_checkins')
+            """
         )
-        if not cursor.fetchone():
+        found_tables = {row[0] for row in cursor.fetchall()}
+        missing_tables = {'bms_telemetry', 'device_status_checkins'} - found_tables
+        if missing_tables:
             raise RuntimeError(
-                f"bms_telemetry table not found in database: {DATABASE_PATH}"
+                f"missing database tables {sorted(missing_tables)} in: {DATABASE_PATH}"
             )
+    finally:
+        conn.close()
+
+
+def insert_device_status_checkin(status: Dict) -> Optional[int]:
+    """Insert a normalized device status, suppressing duplicate retained replay."""
+    conn = create_db_connection(use_row_factory=False)
+    try:
+        cursor = conn.cursor()
+        if status['mqtt_retained']:
+            cursor.execute(
+                """
+                SELECT id
+                FROM device_status_checkins
+                WHERE device_id = ?
+                  AND boot_id = ?
+                  AND pending_verify = ?
+                  AND firmware_version = ?
+                  AND payload_sha256 = ?
+                LIMIT 1
+                """,
+                (
+                    status['device_id'],
+                    status['boot_id'],
+                    status['pending_verify'],
+                    status['firmware_version'],
+                    status['payload_sha256']
+                )
+            )
+            existing = cursor.fetchone()
+            if existing:
+                return None
+
+        cursor.execute(
+            """
+            INSERT INTO device_status_checkins (
+                device_id, schema_version, firmware_version, ota_slot,
+                pending_verify, boot_id, reset_reason, idf_version,
+                build_date, build_time, reported_online, mqtt_retained,
+                payload_sha256, raw_payload, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                status['device_id'],
+                status['schema_version'],
+                status['firmware_version'],
+                status['ota_slot'],
+                status['pending_verify'],
+                status['boot_id'],
+                status['reset_reason'],
+                status.get('idf_version'),
+                status.get('build_date'),
+                status.get('build_time'),
+                status['reported_online'],
+                status['mqtt_retained'],
+                status['payload_sha256'],
+                status['raw_payload'],
+                status['received_at']
+            )
+        )
+        row_id = cursor.lastrowid
+        conn.commit()
+        return row_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _normalize_status_row(row: sqlite3.Row) -> Dict:
+    """Convert SQLite integer booleans in a device-status row to JSON booleans."""
+    result = dict(row)
+    result['pending_verify'] = bool(result['pending_verify'])
+    result['reported_online'] = bool(result['reported_online'])
+    result['mqtt_retained'] = bool(result['mqtt_retained'])
+    return result
+
+
+def get_latest_device_status(device_id: str) -> Optional[Dict]:
+    """Get the most recently received status check-in for one device."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT {DEVICE_STATUS_VIEW_COLUMN_SQL}
+            FROM device_status_checkins
+            WHERE device_id = ?
+            ORDER BY received_at DESC, id DESC
+            LIMIT 1
+            """,
+            (device_id,)
+        )
+        row = cursor.fetchone()
+        return _normalize_status_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_latest_status_record_id() -> Optional[int]:
+    """Get the most recent device-status record ID."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(id) AS latest_id FROM device_status_checkins")
+        row = cursor.fetchone()
+        return row['latest_id'] if row else None
     finally:
         conn.close()
 
@@ -660,16 +792,20 @@ def get_data_count(bms_id: Optional[str] = None) -> int:
 
 
 def get_available_bms_ids() -> List[str]:
-    """Get list of all available BMS IDs"""
+    """Get IDs observed in either telemetry or device status."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT DISTINCT bms_id 
-            FROM bms_telemetry 
-            ORDER BY bms_id ASC
+            SELECT device_id
+            FROM (
+                SELECT bms_id AS device_id FROM bms_telemetry
+                UNION
+                SELECT device_id FROM device_status_checkins
+            )
+            ORDER BY device_id ASC
         """)
         rows = cursor.fetchall()
-        return [row['bms_id'] for row in rows]
+        return [row['device_id'] for row in rows]
     finally:
         conn.close()

@@ -66,6 +66,7 @@ MQTT_PORT=1883
 MQTT_USERNAME=admin            # required outside development
 MQTT_PASSWORD=password1234     # required outside development
 MQTT_TOPIC=bms/telemetry/+     # subscribe to bms/telemetry/<bms-id>
+MQTT_STATUS_TOPIC=bms/status/+ # retained boot/OTA status
 
 # Dashboard secret
 FLASK_SECRET_KEY=change-me     # required outside development
@@ -86,6 +87,12 @@ row starts with 23 fixed columns (including the BMS identifier), followed by
 `cell_count` cell voltages and `temp_count` temperatures. The commissioning
 SQLite schema stores up to four cells and three temperatures; missing values
 are padded with `NULL`, while larger or inconsistent rows are rejected.
+
+Devices may also publish retained schema-v1 JSON status records to
+`bms/status/<device_id>`. The logger stores boot, firmware, OTA verification,
+reset-reason, and build metadata separately from telemetry. Retained broker
+replays are deduplicated so restarting the logger does not manufacture status
+history.
 
 The normalized database column order is:
 
@@ -125,6 +132,7 @@ The normalized database column order is:
 - `GET /` - Web dashboard
 - `GET /api/data?hours=1` - Get telemetry data for specified hours
 - `GET /api/latest` - Get most recent reading
+- `GET /api/device-status/latest?bms_id=<id>` - Get most recent boot/OTA status
 - `GET /api/statistics?hours=24` - Get summary statistics
 - `GET /api/health` - Health check endpoint
 

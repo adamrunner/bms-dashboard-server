@@ -54,6 +54,7 @@ MQTT_PORT=1883
 MQTT_USERNAME=admin            # required outside development
 MQTT_PASSWORD=password1234     # required outside development
 MQTT_TOPIC=bms/telemetry/+     # subscribe to bms/telemetry/<bms-id>
+MQTT_STATUS_TOPIC=bms/status/+ # retained boot/OTA status
 
 # Mosquitto Service Configuration
 MQTT_EXTERNAL_PORT=1883        # External port for MQTT
@@ -70,6 +71,13 @@ with `bms_id`, followed by `cell_count` cell values and `temp_count`
 temperature values. The logger normalizes rows into the four-cell,
 three-temperature commissioning schema, padding missing values with `NULL` and
 rejecting inconsistent or larger rows.
+
+Retained JSON boot and OTA records published to
+`bms/status/<device_id>` are persisted in `device_status_checkins`. The
+dashboard displays the latest record for the selected device. Because these
+messages are sent at boot, reconnect, and OTA verification rather than on a
+fixed heartbeat, they are presented as status check-ins rather than current
+online/offline state.
 
 When `APP_ENV=development`, the Python services will log a warning and use development-only fallback values if `FLASK_SECRET_KEY` or MQTT credentials are omitted. In any other environment, those variables must be set explicitly or the services will fail to start.
 

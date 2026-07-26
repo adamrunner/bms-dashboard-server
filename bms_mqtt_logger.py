@@ -7,12 +7,20 @@ Subscribes to MQTT telemetry data and stores it in SQLite database.
 import sqlite3
 import csv
 import io
+import hashlib
+import json
 import logging
 import sys
 import os
+import re
+import time
 from datetime import datetime
 import paho.mqtt.client as mqtt
-from database_queries import ensure_database_schema, create_db_connection
+from database_queries import (
+    ensure_database_schema,
+    create_db_connection,
+    insert_device_status_checkin
+)
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
 
@@ -77,11 +85,24 @@ MQTT_BROKER = os.getenv("MQTT_BROKER", "mosquitto")
 MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USERNAME, MQTT_PASSWORD = resolve_mqtt_credentials()
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry/+")
+MQTT_STATUS_TOPIC = os.getenv("MQTT_STATUS_TOPIC", "bms/status/+")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
 
 INSERT_COLUMNS = ', '.join(EXPECTED_COLUMNS)
 INSERT_PLACEHOLDERS = ', '.join(['?' for _ in EXPECTED_COLUMNS])
 INSERT_SQL = f"INSERT INTO bms_telemetry ({INSERT_COLUMNS}) VALUES ({INSERT_PLACEHOLDERS})"
+
+STATUS_REQUIRED_STRING_FIELDS = {
+    'device_id': 64,
+    'firmware_version': 32,
+    'ota_slot': 32,
+    'boot_id': 64,
+    'reset_reason': 64,
+    'idf_version': 64,
+    'build_date': 32,
+    'build_time': 32
+}
+DEVICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
 
 
 def init_database():
@@ -219,13 +240,97 @@ def insert_telemetry_data(csv_data):
             conn.close()
 
 
+def normalize_status_payload(payload: str, topic: str, mqtt_retained: bool = False) -> dict:
+    """Validate and normalize one schema-v1 device status JSON payload."""
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON: {exc.msg}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("status payload must be a JSON object")
+    if type(parsed.get('schema_version')) is not int:
+        raise ValueError("schema_version must be an integer")
+    if parsed['schema_version'] != 1:
+        raise ValueError(f"unsupported schema_version {parsed['schema_version']}")
+
+    for field, max_length in STATUS_REQUIRED_STRING_FIELDS.items():
+        value = parsed.get(field)
+        if not isinstance(value, str) or not value:
+            raise ValueError(f"{field} must be a non-empty string")
+        if len(value) > max_length:
+            raise ValueError(f"{field} exceeds {max_length} characters")
+
+    for field in ('online', 'pending_verify'):
+        if type(parsed.get(field)) is not bool:
+            raise ValueError(f"{field} must be a boolean")
+
+    device_id = parsed['device_id']
+    if not DEVICE_ID_RE.fullmatch(device_id):
+        raise ValueError("device_id contains unsupported characters")
+
+    topic_device_id = topic.rsplit('/', 1)[-1]
+    if topic_device_id != device_id:
+        raise ValueError(
+            f"topic device ID {topic_device_id!r} does not match payload {device_id!r}"
+        )
+
+    canonical_payload = json.dumps(parsed, sort_keys=True, separators=(',', ':'))
+    return {
+        'device_id': device_id,
+        'schema_version': parsed['schema_version'],
+        'firmware_version': parsed['firmware_version'],
+        'ota_slot': parsed['ota_slot'],
+        'pending_verify': parsed['pending_verify'],
+        'boot_id': parsed['boot_id'],
+        'reset_reason': parsed['reset_reason'],
+        'idf_version': parsed['idf_version'],
+        'build_date': parsed['build_date'],
+        'build_time': parsed['build_time'],
+        'reported_online': parsed['online'],
+        'mqtt_retained': bool(mqtt_retained),
+        'payload_sha256': hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest(),
+        'raw_payload': canonical_payload,
+        'received_at': int(time.time())
+    }
+
+
+def insert_status_data(payload: str, topic: str, mqtt_retained: bool = False):
+    """Validate and persist one device status, returning its row ID if inserted."""
+    status = normalize_status_payload(payload, topic, mqtt_retained)
+    row_id = insert_device_status_checkin(status)
+    if row_id is None:
+        logger.info(
+            "Ignored duplicate retained status for %s boot %s",
+            status['device_id'],
+            status['boot_id']
+        )
+    else:
+        logger.info(
+            "Inserted device status row %s for %s firmware %s",
+            row_id,
+            status['device_id'],
+            status['firmware_version']
+        )
+    return row_id
+
+
 def on_connect(client, userdata, flags, rc):
     """Callback for when client connects to MQTT broker"""
     logger.debug(f"Connection callback called with rc={rc}")
     if rc == 0:
         logger.info("Connected to MQTT broker")
-        result, mid = client.subscribe(MQTT_TOPIC)
-        logger.info(f"Subscribed to topic: {MQTT_TOPIC}, result={result}, mid={mid}")
+        result, mid = client.subscribe([
+            (MQTT_TOPIC, 0),
+            (MQTT_STATUS_TOPIC, 1)
+        ])
+        logger.info(
+            "Subscribed to topics: %s and %s, result=%s, mid=%s",
+            MQTT_TOPIC,
+            MQTT_STATUS_TOPIC,
+            result,
+            mid
+        )
     else:
         logger.error(f"Failed to connect to MQTT broker, return code {rc}")
         
@@ -241,9 +346,13 @@ def on_message(client, userdata, msg):
         payload = msg.payload.decode('utf-8')
         logger.info(f"Received message on topic {msg.topic}")
         logger.debug(f"Payload: {payload}")
-        
-        # Insert data into database
-        insert_telemetry_data(payload)
+
+        if mqtt.topic_matches_sub(MQTT_STATUS_TOPIC, msg.topic):
+            insert_status_data(payload, msg.topic, msg.retain)
+        elif mqtt.topic_matches_sub(MQTT_TOPIC, msg.topic):
+            insert_telemetry_data(payload)
+        else:
+            logger.warning("Ignoring message on unexpected topic: %s", msg.topic)
         
     except Exception as e:
         logger.error(f"Error processing message: {e}")

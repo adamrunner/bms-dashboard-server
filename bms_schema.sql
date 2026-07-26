@@ -37,3 +37,29 @@ CREATE INDEX IF NOT EXISTS idx_bms_id ON bms_telemetry(bms_id);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON bms_telemetry(timestamp);
 CREATE INDEX IF NOT EXISTS idx_bms_id_timestamp ON bms_telemetry(bms_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_created_at ON bms_telemetry(created_at);
+
+CREATE TABLE IF NOT EXISTS device_status_checkins (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    schema_version INTEGER NOT NULL,
+    firmware_version TEXT NOT NULL,
+    ota_slot TEXT NOT NULL,
+    pending_verify BOOLEAN NOT NULL,
+    boot_id TEXT NOT NULL,
+    reset_reason TEXT NOT NULL,
+    idf_version TEXT,
+    build_date TEXT,
+    build_time TEXT,
+    reported_online BOOLEAN NOT NULL,
+    mqtt_retained BOOLEAN NOT NULL DEFAULT 0,
+    payload_sha256 TEXT NOT NULL,
+    raw_payload TEXT NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_status_device_received
+    ON device_status_checkins(device_id, received_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_device_status_device_boot
+    ON device_status_checkins(device_id, boot_id);
+CREATE INDEX IF NOT EXISTS idx_device_status_received
+    ON device_status_checkins(received_at);

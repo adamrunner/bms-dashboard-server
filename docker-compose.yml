@@ -57,6 +57,7 @@ services:
       MQTT_USERNAME: ${MQTT_USERNAME:-}
       MQTT_PASSWORD: ${MQTT_PASSWORD:-}
       MQTT_TOPIC: ${MQTT_TOPIC:-bms/telemetry/+}
+      MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-bms/status/+}
       DATABASE_PATH: /app/data/bms_telemetry.db
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:

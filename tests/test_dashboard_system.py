@@ -1,6 +1,7 @@
 import tempfile
 import time
 import unittest
+import json
 from pathlib import Path
 from unittest import mock
 
@@ -25,6 +26,28 @@ def build_gateway_simulator_payload(bms_id: str, timestamp: int) -> str:
     )
 
 
+def build_status_payload(
+    device_id: str,
+    *,
+    firmware_version: str = "9217453",
+    boot_id: str = "0123456789abcdef",
+    pending_verify: bool = False
+) -> str:
+    return json.dumps({
+        "schema_version": 1,
+        "device_id": device_id,
+        "online": True,
+        "firmware_version": firmware_version,
+        "ota_slot": "ota_1",
+        "pending_verify": pending_verify,
+        "boot_id": boot_id,
+        "reset_reason": "software",
+        "idf_version": "v5.5",
+        "build_date": "Jul 25 2026",
+        "build_time": "17:43:00"
+    })
+
+
 class DashboardSystemTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -41,6 +64,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         dashboard_server.client_view_config.clear()
         dashboard_server.monitoring_active = False
         dashboard_server.last_seen_record_id = None
+        dashboard_server.last_seen_status_id = None
 
     def tearDown(self):
         database_queries.DATABASE_PATH = self.original_database_path
@@ -49,7 +73,19 @@ class DashboardSystemTestCase(unittest.TestCase):
         dashboard_server.client_view_config.clear()
         dashboard_server.monitoring_active = False
         dashboard_server.last_seen_record_id = None
+        dashboard_server.last_seen_status_id = None
         self.temp_dir.cleanup()
+
+    def count_status_rows(self, device_id: str) -> int:
+        conn = database_queries.create_db_connection()
+        try:
+            row = conn.execute(
+                "SELECT COUNT(*) AS count FROM device_status_checkins WHERE device_id = ?",
+                (device_id,)
+            ).fetchone()
+            return row["count"]
+        finally:
+            conn.close()
 
     def test_convert_value_handles_bool_and_numeric_fields(self):
         self.assertTrue(bms_mqtt_logger.convert_value("true", "charging_enabled"))
@@ -91,6 +127,113 @@ class DashboardSystemTestCase(unittest.TestCase):
         bms_mqtt_logger.insert_telemetry_data(",".join(fields))
 
         self.assertIsNone(database_queries.get_latest_reading("gw-too-many-cells"))
+
+    def test_status_schema_is_created_additively(self):
+        conn = database_queries.create_db_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name = 'device_status_checkins'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual(row["name"], "device_status_checkins")
+        database_queries.validate_database_schema()
+
+    def test_valid_status_is_normalized_and_inserted(self):
+        payload = build_status_payload("gw-status")
+
+        row_id = bms_mqtt_logger.insert_status_data(
+            payload,
+            "bms/status/gw-status",
+            mqtt_retained=False
+        )
+        latest = database_queries.get_latest_device_status("gw-status")
+
+        self.assertIsNotNone(row_id)
+        self.assertEqual(latest["firmware_version"], "9217453")
+        self.assertEqual(latest["ota_slot"], "ota_1")
+        self.assertFalse(latest["pending_verify"])
+        self.assertFalse(latest["mqtt_retained"])
+        self.assertTrue(latest["reported_online"])
+
+    def test_mqtt_connect_subscribes_to_telemetry_and_status(self):
+        client = mock.Mock()
+        client.subscribe.return_value = (0, 42)
+
+        bms_mqtt_logger.on_connect(client, None, None, 0)
+
+        client.subscribe.assert_called_once_with([
+            (bms_mqtt_logger.MQTT_TOPIC, 0),
+            (bms_mqtt_logger.MQTT_STATUS_TOPIC, 1)
+        ])
+
+    def test_status_validation_rejects_bad_payloads(self):
+        with self.assertRaisesRegex(ValueError, "invalid JSON"):
+            bms_mqtt_logger.normalize_status_payload(
+                "{",
+                "bms/status/gw-invalid"
+            )
+
+        missing_field = json.loads(build_status_payload("gw-missing"))
+        del missing_field["firmware_version"]
+        with self.assertRaisesRegex(ValueError, "firmware_version"):
+            bms_mqtt_logger.normalize_status_payload(
+                json.dumps(missing_field),
+                "bms/status/gw-missing"
+            )
+
+        unsupported = json.loads(build_status_payload("gw-schema"))
+        unsupported["schema_version"] = 2
+        with self.assertRaisesRegex(ValueError, "unsupported schema_version"):
+            bms_mqtt_logger.normalize_status_payload(
+                json.dumps(unsupported),
+                "bms/status/gw-schema"
+            )
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            bms_mqtt_logger.normalize_status_payload(
+                build_status_payload("gw-payload"),
+                "bms/status/gw-topic"
+            )
+
+    def test_retained_status_replay_is_deduplicated(self):
+        payload = build_status_payload("gw-retained")
+
+        first_id = bms_mqtt_logger.insert_status_data(
+            payload,
+            "bms/status/gw-retained",
+            mqtt_retained=True
+        )
+        second_id = bms_mqtt_logger.insert_status_data(
+            payload,
+            "bms/status/gw-retained",
+            mqtt_retained=True
+        )
+
+        self.assertIsNotNone(first_id)
+        self.assertIsNone(second_id)
+        self.assertEqual(self.count_status_rows("gw-retained"), 1)
+
+    def test_live_status_checkins_from_same_boot_remain_distinct(self):
+        payload = build_status_payload("gw-live")
+
+        first_id = bms_mqtt_logger.insert_status_data(
+            payload,
+            "bms/status/gw-live",
+            mqtt_retained=False
+        )
+        second_id = bms_mqtt_logger.insert_status_data(
+            payload,
+            "bms/status/gw-live",
+            mqtt_retained=False
+        )
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(self.count_status_rows("gw-live"), 2)
 
     def test_secret_and_mqtt_config_use_development_fallbacks(self):
         with mock.patch.dict('os.environ', {'APP_ENV': 'development'}, clear=False):
@@ -181,6 +324,32 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertNotIn("created_at", payload["records"][0])
         self.assertEqual(payload["records"][0]["pack_voltage_v"], 13.4)
 
+    def test_latest_device_status_api_and_device_id_union(self):
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload("gw-status-only", pending_verify=True),
+            "bms/status/gw-status-only",
+            mqtt_retained=True
+        )
+
+        client = dashboard_server.app.test_client()
+        response = client.get(
+            "/api/device-status/latest?bms_id=gw-status-only"
+        )
+        missing_id_response = client.get("/api/device-status/latest")
+        unknown_response = client.get(
+            "/api/device-status/latest?bms_id=gw-unknown"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        status = response.get_json()
+        self.assertEqual(status["device_id"], "gw-status-only")
+        self.assertTrue(status["pending_verify"])
+        self.assertTrue(status["mqtt_retained"])
+        self.assertIn("received_age_seconds", status)
+        self.assertEqual(missing_id_response.status_code, 400)
+        self.assertEqual(unknown_response.get_json(), {})
+        self.assertIn("gw-status-only", database_queries.get_available_bms_ids())
+
     def test_auto_view_aggregates_thirty_minute_range(self):
         now = int(time.time())
         bucket_start = (now - 60) - ((now - 60) % 30)
@@ -254,6 +423,61 @@ class DashboardSystemTestCase(unittest.TestCase):
         records = view_messages[0]["args"][0]["records"]
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["pack_voltage_v"], 13.6)
+
+    def test_background_monitor_emits_selected_device_status(self):
+        now = int(time.time())
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-socket-status", now)
+        )
+
+        with mock.patch.object(
+            dashboard_server.socketio,
+            "start_background_task",
+            return_value=None
+        ):
+            client = dashboard_server.socketio.test_client(dashboard_server.app)
+            client.get_received()
+            client.emit(
+                "set_view",
+                {
+                    "hours": 1,
+                    "bms_id": "gw-socket-status",
+                    "resolution": "auto",
+                    "target_points": 300
+                }
+            )
+            client.get_received()
+
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload("gw-socket-status"),
+            "bms/status/gw-socket-status",
+            mqtt_retained=False
+        )
+        dashboard_server.last_seen_record_id = database_queries.get_latest_record_id()
+        dashboard_server.last_seen_status_id = None
+        dashboard_server.monitoring_active = True
+
+        def stop_monitor(_seconds):
+            dashboard_server.monitoring_active = False
+
+        with mock.patch.object(
+            dashboard_server.socketio,
+            "sleep",
+            side_effect=stop_monitor
+        ):
+            dashboard_server.background_monitor()
+
+        received = client.get_received()
+        client.disconnect()
+        status_messages = [
+            message for message in received
+            if message["name"] == "device_status_update"
+        ]
+
+        self.assertEqual(len(status_messages), 1)
+        status = status_messages[0]["args"][0]
+        self.assertEqual(status["device_id"], "gw-socket-status")
+        self.assertEqual(status["firmware_version"], "9217453")
 
 
 if __name__ == "__main__":
