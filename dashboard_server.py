@@ -7,6 +7,7 @@ Flask application with WebSocket support for real-time telemetry display
 import sys
 import time
 import os
+import re
 from flask import Flask, render_template, jsonify, request
 from flask_socketio import SocketIO, emit
 from database_queries import (
@@ -15,10 +16,15 @@ from database_queries import (
     should_aggregate_view, ensure_database_schema, validate_database_schema,
     get_latest_record_id, get_latest_device_status, get_latest_status_record_id,
     get_latest_device_availability, get_latest_availability_record_id,
-    get_device_status_history, get_fleet_status
+    get_device_status_history, get_fleet_status, get_device_alerts,
+    acknowledge_device_alert, get_firmware_expectations,
+    set_firmware_expectation, delete_firmware_expectation
 )
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
+DEVICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
+FLEET_EXPECTATION_ROUTE_ID = '_fleet'
+MAX_EXPECTATION_GRACE_SECONDS = 30 * 24 * 60 * 60
 
 
 def get_app_env() -> str:
@@ -399,6 +405,7 @@ def api_fleet_status():
         offline_count = 0
         unknown_availability_count = 0
         pending_verify_count = 0
+        active_alert_count = 0
 
         for device in devices:
             if device['status_received_at'] is not None:
@@ -428,6 +435,17 @@ def api_fleet_status():
             version = device['firmware_version'] or 'Unknown'
             firmware_counts[version] = firmware_counts.get(version, 0) + 1
             pending_verify_count += int(device['pending_verify'] is True)
+            active_alert_count += device['active_alert_count']
+            expected_version = device['expected_firmware_version']
+            device['firmware_matches_expectation'] = (
+                None
+                if expected_version is None or device['firmware_version'] is None
+                else device['firmware_version'] == expected_version
+            )
+            device['expectation_in_grace'] = (
+                device['expectation_grace_until'] is not None
+                and now < device['expectation_grace_until']
+            )
             if device['mqtt_online'] is True:
                 online_count += 1
             elif device['mqtt_online'] is False:
@@ -450,12 +468,130 @@ def api_fleet_status():
                 'offline_count': offline_count,
                 'unknown_availability_count': unknown_availability_count,
                 'pending_verify_count': pending_verify_count,
+                'active_alert_count': active_alert_count,
                 'firmware_versions': firmware_versions
             },
             'devices': devices
         })
     except Exception as e:
         print(f"Error fetching fleet status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/alerts')
+def api_alerts():
+    """Return alert history, optionally scoped to a device or active alerts."""
+    device_id = request.args.get('device_id', default=None, type=str)
+    if device_id and not DEVICE_ID_RE.fullmatch(device_id):
+        return jsonify({'error': 'device_id contains unsupported characters'}), 400
+
+    raw_active = request.args.get('active', default='false', type=str).lower()
+    if raw_active not in {'true', 'false'}:
+        return jsonify({'error': 'active must be true or false'}), 400
+    try:
+        limit = int(request.args.get('limit', default='100', type=str))
+        if not 1 <= limit <= 500:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({'error': 'limit must be an integer from 1 to 500'}), 400
+
+    try:
+        return jsonify({
+            'alerts': get_device_alerts(
+                device_id,
+                active_only=raw_active == 'true',
+                limit=limit
+            )
+        })
+    except Exception as e:
+        print(f"Error fetching alerts: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/alerts/<int:alert_id>/acknowledge', methods=['POST'])
+def api_acknowledge_alert(alert_id):
+    """Persist acknowledgement for an alert without resolving it."""
+    try:
+        if not acknowledge_device_alert(alert_id, int(time.time())):
+            return jsonify({'error': 'alert not found'}), 404
+        return jsonify({'acknowledged': True, 'alert_id': alert_id})
+    except Exception as e:
+        print(f"Error acknowledging alert: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/firmware-expectations')
+def api_firmware_expectations():
+    """Return the fleet default and all device-specific expectations."""
+    try:
+        return jsonify({'expectations': get_firmware_expectations()})
+    except Exception as e:
+        print(f"Error fetching firmware expectations: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+def _expectation_device_id(route_device_id):
+    if route_device_id == FLEET_EXPECTATION_ROUTE_ID:
+        return None
+    if not DEVICE_ID_RE.fullmatch(route_device_id):
+        raise ValueError('device ID contains unsupported characters')
+    return route_device_id
+
+
+@app.route(
+    '/api/firmware-expectations/<route_device_id>',
+    methods=['PUT', 'DELETE']
+)
+def api_firmware_expectation(route_device_id):
+    """Set or clear a fleet-default or device-specific expectation."""
+    try:
+        device_id = _expectation_device_id(route_device_id)
+    except ValueError as exc:
+        return jsonify({'error': str(exc)}), 400
+
+    now = int(time.time())
+    try:
+        if request.method == 'DELETE':
+            deleted = delete_firmware_expectation(device_id, now)
+            if not deleted:
+                return jsonify({'error': 'firmware expectation not found'}), 404
+            return jsonify({'deleted': True})
+
+        payload = request.get_json(silent=True)
+        if not isinstance(payload, dict):
+            return jsonify({'error': 'JSON object body is required'}), 400
+        expected_version = payload.get('expected_version')
+        if not isinstance(expected_version, str):
+            return jsonify({'error': 'expected_version must be a string'}), 400
+        expected_version = expected_version.strip()
+        if not expected_version or len(expected_version) > 32:
+            return jsonify({
+                'error': 'expected_version must be 1 to 32 characters'
+            }), 400
+
+        grace_seconds = payload.get('grace_seconds', 0)
+        if (
+            type(grace_seconds) is not int
+            or not 0 <= grace_seconds <= MAX_EXPECTATION_GRACE_SECONDS
+        ):
+            return jsonify({
+                'error': 'grace_seconds must be an integer from 0 to 2592000'
+            }), 400
+        grace_until = now + grace_seconds if grace_seconds else None
+        set_firmware_expectation(
+            device_id,
+            expected_version,
+            grace_until,
+            now
+        )
+        return jsonify({
+            'device_id': device_id,
+            'expected_version': expected_version,
+            'grace_until': grace_until,
+            'updated_at': now
+        })
+    except Exception as e:
+        print(f"Error updating firmware expectation: {e}")
         return jsonify({'error': str(e)}), 500
 
 

@@ -85,3 +85,29 @@ CREATE INDEX IF NOT EXISTS idx_device_availability_device_received
     ON device_availability_events(device_id, received_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_device_availability_received
     ON device_availability_events(received_at);
+
+CREATE TABLE IF NOT EXISTS firmware_expectations (
+    device_id TEXT PRIMARY KEY,
+    expected_version TEXT NOT NULL,
+    grace_until INTEGER,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS device_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    alert_type TEXT NOT NULL,
+    severity TEXT NOT NULL,
+    source_status_id INTEGER NOT NULL,
+    dedup_key TEXT NOT NULL UNIQUE,
+    details_json TEXT NOT NULL,
+    detected_at INTEGER NOT NULL,
+    acknowledged_at INTEGER,
+    resolved_at INTEGER,
+    FOREIGN KEY(source_status_id) REFERENCES device_status_checkins(id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_alerts_device_detected
+    ON device_alerts(device_id, detected_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_device_alerts_active
+    ON device_alerts(device_id, resolved_at, detected_at DESC);

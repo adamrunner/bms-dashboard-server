@@ -20,28 +20,34 @@
         <div id="fleetError" class="alert alert-danger d-none" role="alert"></div>
 
         <section class="row g-3 mb-4" aria-label="Fleet summary">
-            <div class="col-6 col-lg-3">
+            <div class="col-6 col-lg">
                 <div class="metric-card h-100">
                     <div class="metric-value" id="fleetDeviceCount">--</div>
                     <div class="metric-label">Known Devices</div>
                 </div>
             </div>
-            <div class="col-6 col-lg-3">
+            <div class="col-6 col-lg">
                 <div class="metric-card h-100">
                     <div class="metric-value" id="fleetOnlineCount">--</div>
                     <div class="metric-label">MQTT Online</div>
                 </div>
             </div>
-            <div class="col-6 col-lg-3">
+            <div class="col-6 col-lg">
                 <div class="metric-card h-100">
                     <div class="metric-value" id="fleetPendingCount">--</div>
                     <div class="metric-label">Pending Verification</div>
                 </div>
             </div>
-            <div class="col-6 col-lg-3">
+            <div class="col-6 col-lg">
                 <div class="metric-card h-100">
                     <div class="metric-value" id="fleetVersionCount">--</div>
                     <div class="metric-label">Firmware Versions</div>
+                </div>
+            </div>
+            <div class="col-6 col-lg">
+                <div class="metric-card h-100">
+                    <div class="metric-value" id="fleetAlertCount">--</div>
+                    <div class="metric-label">Active Alerts</div>
                 </div>
             </div>
         </section>
@@ -54,25 +60,62 @@
                 </button>
             </div>
             <div class="card-body">
+                <div class="border rounded p-3 mb-3">
+                    <h3 class="h6">Fleet Firmware Default</h3>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-5">
+                            <label class="form-label" for="fleetExpectedFirmware">
+                                Expected version
+                            </label>
+                            <input class="form-control" id="fleetExpectedFirmware"
+                                   maxlength="32" placeholder="For example: v2.1.0">
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label" for="fleetGraceHours">
+                                Grace period (hours)
+                            </label>
+                            <input class="form-control" id="fleetGraceHours" type="number"
+                                   min="0" max="720" step="1" value="0">
+                        </div>
+                        <div class="col-md-4 d-flex gap-2">
+                            <button class="btn btn-primary" type="button"
+                                    id="setFleetExpectation">Set default</button>
+                            <button class="btn btn-outline-secondary" type="button"
+                                    id="clearFleetExpectation">Clear</button>
+                        </div>
+                    </div>
+                    <div class="form-text" id="fleetExpectationStatus">
+                        No fleet-wide expectation configured.
+                    </div>
+                </div>
+
                 <div class="row g-3 mb-3">
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label class="form-label" for="deviceFilter">Device</label>
                         <input class="form-control" id="deviceFilter" type="search"
                                placeholder="Filter device ID">
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label class="form-label" for="firmwareFilter">Firmware</label>
                         <select class="form-select" id="firmwareFilter">
                             <option value="">All versions</option>
                         </select>
                     </div>
-                    <div class="col-md-4">
+                    <div class="col-md-3">
                         <label class="form-label" for="availabilityFilter">MQTT Availability</label>
                         <select class="form-select" id="availabilityFilter">
                             <option value="">All states</option>
                             <option value="online">Online</option>
                             <option value="offline">Offline</option>
                             <option value="unknown">Unknown</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label" for="alertFilter">Alerts</label>
+                        <select class="form-select" id="alertFilter">
+                            <option value="">All devices</option>
+                            <option value="active">Active alerts</option>
+                            <option value="none">No active alerts</option>
                         </select>
                     </div>
                 </div>
@@ -86,6 +129,8 @@
                                 <th>Device</th>
                                 <th>MQTT</th>
                                 <th>Firmware</th>
+                                <th>Expected</th>
+                                <th>Alerts</th>
                                 <th>OTA</th>
                                 <th>Last Reset</th>
                                 <th>Last Status</th>
@@ -101,7 +146,7 @@
             </div>
         </section>
 
-        <section class="card">
+        <section class="card mb-4">
             <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
                 <div>
                     <h2 class="h5 mb-0">Status History</h2>
@@ -137,6 +182,70 @@
                 <button type="button" class="btn btn-outline-primary d-none" id="loadMoreHistory">
                     Load More
                 </button>
+            </div>
+        </section>
+
+        <section class="card">
+            <div class="card-header d-flex flex-wrap justify-content-between align-items-center gap-2">
+                <div>
+                    <h2 class="h5 mb-0">Alerts &amp; Device Firmware Policy</h2>
+                    <div class="small text-muted" id="alertDeviceLabel">
+                        Select a device from the fleet.
+                    </div>
+                </div>
+                <select class="form-select form-select-sm w-auto" id="alertHistoryFilter">
+                    <option value="active">Active alerts</option>
+                    <option value="all">All alert history</option>
+                </select>
+            </div>
+            <div class="card-body">
+                <div class="border rounded p-3 mb-3">
+                    <h3 class="h6">Device Override</h3>
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-5">
+                            <label class="form-label" for="deviceExpectedFirmware">
+                                Expected version
+                            </label>
+                            <input class="form-control" id="deviceExpectedFirmware"
+                                   maxlength="32" disabled>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label" for="deviceGraceHours">
+                                Grace period (hours)
+                            </label>
+                            <input class="form-control" id="deviceGraceHours" type="number"
+                                   min="0" max="720" step="1" value="0" disabled>
+                        </div>
+                        <div class="col-md-4 d-flex gap-2">
+                            <button class="btn btn-primary" type="button"
+                                    id="setDeviceExpectation" disabled>Set override</button>
+                            <button class="btn btn-outline-secondary" type="button"
+                                    id="clearDeviceExpectation" disabled>Clear override</button>
+                        </div>
+                    </div>
+                    <div class="form-text" id="deviceExpectationStatus">
+                        Select a device to manage its expectation.
+                    </div>
+                </div>
+
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle">
+                        <thead>
+                            <tr>
+                                <th>Detected</th>
+                                <th>Severity</th>
+                                <th>Alert</th>
+                                <th>Details</th>
+                                <th>State</th>
+                                <th></th>
+                            </tr>
+                        </thead>
+                        <tbody id="alertTableBody"></tbody>
+                    </table>
+                </div>
+                <div class="text-muted" id="alertEmptyState">
+                    No device selected.
+                </div>
             </div>
         </section>
     </main>

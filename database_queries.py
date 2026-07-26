@@ -6,10 +6,18 @@ Database query functions for BMS telemetry data
 import sqlite3
 import os
 import math
+import json
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
+FLEET_EXPECTATION_DEVICE_ID = "__fleet__"
+WATCHDOG_RESET_REASONS = {
+    'interrupt_watchdog',
+    'task_watchdog',
+    'watchdog',
+    'cpu_lockup',
+}
 
 ALLOWED_BUCKET_SECONDS = [10, 30, 60, 180, 300, 600, 900, 1800]
 RESOLUTION_SECONDS_MAP = {
@@ -138,7 +146,9 @@ def validate_database_schema() -> None:
               AND name IN (
                   'bms_telemetry',
                   'device_status_checkins',
-                  'device_availability_events'
+                  'device_availability_events',
+                  'firmware_expectations',
+                  'device_alerts'
               )
             """
         )
@@ -147,6 +157,8 @@ def validate_database_schema() -> None:
             'bms_telemetry',
             'device_status_checkins',
             'device_availability_events',
+            'firmware_expectations',
+            'device_alerts',
         }
         missing_tables = expected_tables - found_tables
         if missing_tables:
@@ -159,7 +171,7 @@ def validate_database_schema() -> None:
 
 def insert_device_status_checkin(status: Dict) -> Optional[int]:
     """Insert status, exactly deduplicating v2 and heuristically deduplicating v1."""
-    conn = create_db_connection(use_row_factory=False)
+    conn = create_db_connection()
     try:
         cursor = conn.cursor()
         if status.get('status_seq') is None and status['mqtt_retained']:
@@ -225,11 +237,398 @@ def insert_device_status_checkin(status: Dict) -> Optional[int]:
         if cursor.rowcount == 0:
             return None
         row_id = cursor.lastrowid
+        _evaluate_status_alerts(conn, row_id, status)
         conn.commit()
         return row_id
     except Exception:
         conn.rollback()
         raise
+    finally:
+        conn.close()
+
+
+def _insert_alert(
+    conn: sqlite3.Connection,
+    *,
+    device_id: str,
+    alert_type: str,
+    severity: str,
+    source_status_id: int,
+    dedup_key: str,
+    details: Dict,
+    detected_at: int
+) -> None:
+    conn.execute(
+        """
+        INSERT INTO device_alerts (
+            device_id, alert_type, severity, source_status_id,
+            dedup_key, details_json, detected_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(dedup_key) DO NOTHING
+        """,
+        (
+            device_id,
+            alert_type,
+            severity,
+            source_status_id,
+            dedup_key,
+            json.dumps(details, sort_keys=True, separators=(',', ':')),
+            detected_at,
+        )
+    )
+
+
+def _effective_expectation(
+    conn: sqlite3.Connection,
+    device_id: str
+) -> Optional[sqlite3.Row]:
+    return conn.execute(
+        """
+        SELECT device_id, expected_version, grace_until, updated_at
+        FROM firmware_expectations
+        WHERE device_id IN (?, ?)
+        ORDER BY CASE WHEN device_id = ? THEN 0 ELSE 1 END
+        LIMIT 1
+        """,
+        (device_id, FLEET_EXPECTATION_DEVICE_ID, device_id)
+    ).fetchone()
+
+
+def _evaluate_unexpected_firmware(
+    conn: sqlite3.Connection,
+    source_status_id: int,
+    status: Dict
+) -> None:
+    device_id = status['device_id']
+    expectation = _effective_expectation(conn, device_id)
+    active_rows = conn.execute(
+        """
+        SELECT id, details_json
+        FROM device_alerts
+        WHERE device_id = ?
+          AND alert_type = 'unexpected_firmware'
+          AND resolved_at IS NULL
+        """,
+        (device_id,)
+    ).fetchall()
+
+    if expectation is None or status['firmware_version'] == expectation['expected_version']:
+        if active_rows:
+            conn.execute(
+                """
+                UPDATE device_alerts
+                SET resolved_at = ?
+                WHERE device_id = ?
+                  AND alert_type = 'unexpected_firmware'
+                  AND resolved_at IS NULL
+                """,
+                (status['received_at'], device_id)
+            )
+        return
+
+    expected_version = expectation['expected_version']
+    actual_version = status['firmware_version']
+    matching_active = False
+    for row in active_rows:
+        details = json.loads(row['details_json'])
+        if (
+            details.get('expected_version') == expected_version
+            and details.get('actual_version') == actual_version
+        ):
+            matching_active = True
+        else:
+            conn.execute(
+                "UPDATE device_alerts SET resolved_at = ? WHERE id = ?",
+                (status['received_at'], row['id'])
+            )
+
+    grace_until = expectation['grace_until']
+    if matching_active or (
+        grace_until is not None and status['received_at'] < grace_until
+    ):
+        return
+
+    _insert_alert(
+        conn,
+        device_id=device_id,
+        alert_type='unexpected_firmware',
+        severity='warning',
+        source_status_id=source_status_id,
+        dedup_key=f"unexpected_firmware:{source_status_id}",
+        details={
+            'expected_version': expected_version,
+            'actual_version': actual_version,
+            'expectation_scope': (
+                'fleet'
+                if expectation['device_id'] == FLEET_EXPECTATION_DEVICE_ID
+                else 'device'
+            ),
+        },
+        detected_at=status['received_at']
+    )
+
+
+def _evaluate_status_alerts(
+    conn: sqlite3.Connection,
+    source_status_id: int,
+    status: Dict
+) -> None:
+    """Create and resolve alert lifecycle state in the status transaction."""
+    device_id = status['device_id']
+    detected_at = status['received_at']
+
+    if status.get('status_reason') == 'rollback_detected':
+        rollback_from = status.get('rollback_from_version')
+        rollback_target = status.get('rollback_target_version')
+        _insert_alert(
+            conn,
+            device_id=device_id,
+            alert_type='firmware_rollback',
+            severity='critical',
+            source_status_id=source_status_id,
+            dedup_key=(
+                f"firmware_rollback:{device_id}:{status['boot_id']}:"
+                f"{rollback_from}:{rollback_target}"
+            ),
+            details={
+                'rollback_from_version': rollback_from,
+                'rollback_target_version': rollback_target,
+            },
+            detected_at=detected_at
+        )
+    elif status.get('status_reason') == 'ota_verified':
+        conn.execute(
+            """
+            UPDATE device_alerts
+            SET resolved_at = ?
+            WHERE device_id = ?
+              AND alert_type = 'firmware_rollback'
+              AND resolved_at IS NULL
+            """,
+            (detected_at, device_id)
+        )
+
+    if status['reset_reason'] in WATCHDOG_RESET_REASONS:
+        _insert_alert(
+            conn,
+            device_id=device_id,
+            alert_type='watchdog_reset',
+            severity=(
+                'critical'
+                if status['reset_reason'] == 'cpu_lockup'
+                else 'warning'
+            ),
+            source_status_id=source_status_id,
+            dedup_key=(
+                f"watchdog_reset:{device_id}:{status['boot_id']}:"
+                f"{status['reset_reason']}"
+            ),
+            details={'reset_reason': status['reset_reason']},
+            detected_at=detected_at
+        )
+    elif status.get('status_reason') in {
+        'boot',
+        'ota_pending_verify',
+        'rollback_detected',
+    }:
+        conn.execute(
+            """
+            UPDATE device_alerts
+            SET resolved_at = ?
+            WHERE device_id = ?
+              AND alert_type = 'watchdog_reset'
+              AND resolved_at IS NULL
+              AND source_status_id IN (
+                  SELECT id
+                  FROM device_status_checkins
+                  WHERE device_id = ?
+                    AND boot_id <> ?
+              )
+            """,
+            (detected_at, device_id, device_id, status['boot_id'])
+        )
+
+    _evaluate_unexpected_firmware(conn, source_status_id, status)
+
+
+def set_firmware_expectation(
+    device_id: Optional[str],
+    expected_version: str,
+    grace_until: Optional[int],
+    updated_at: int
+) -> None:
+    """Create or replace a device expectation or the fleet-wide default."""
+    expectation_id = device_id or FLEET_EXPECTATION_DEVICE_ID
+    conn = create_db_connection()
+    try:
+        conn.execute(
+            """
+            INSERT INTO firmware_expectations (
+                device_id, expected_version, grace_until, updated_at
+            ) VALUES (?, ?, ?, ?)
+            ON CONFLICT(device_id) DO UPDATE SET
+                expected_version = excluded.expected_version,
+                grace_until = excluded.grace_until,
+                updated_at = excluded.updated_at
+            """,
+            (expectation_id, expected_version, grace_until, updated_at)
+        )
+        _resolve_expectation_alerts(conn, device_id, updated_at)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def delete_firmware_expectation(
+    device_id: Optional[str],
+    resolved_at: int
+) -> bool:
+    """Remove one expectation and resolve its device-scoped mismatch alerts."""
+    expectation_id = device_id or FLEET_EXPECTATION_DEVICE_ID
+    conn = create_db_connection()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM firmware_expectations WHERE device_id = ?",
+            (expectation_id,)
+        )
+        _resolve_expectation_alerts(conn, device_id, resolved_at)
+        conn.commit()
+        return cursor.rowcount > 0
+    finally:
+        conn.close()
+
+
+def _resolve_expectation_alerts(
+    conn: sqlite3.Connection,
+    device_id: Optional[str],
+    resolved_at: int
+) -> None:
+    """Resolve mismatch episodes invalidated by a policy change or deletion."""
+    if device_id is not None:
+        conn.execute(
+            """
+            UPDATE device_alerts
+            SET resolved_at = ?
+            WHERE device_id = ?
+              AND alert_type = 'unexpected_firmware'
+              AND resolved_at IS NULL
+            """,
+            (resolved_at, device_id)
+        )
+        return
+
+    active_rows = conn.execute(
+        """
+        SELECT id, details_json
+        FROM device_alerts
+        WHERE alert_type = 'unexpected_firmware'
+          AND resolved_at IS NULL
+        """
+    ).fetchall()
+    fleet_alert_ids = []
+    for row in active_rows:
+        details = json.loads(row['details_json'])
+        if details.get('expectation_scope') == 'fleet':
+            fleet_alert_ids.append(row['id'])
+    if fleet_alert_ids:
+        placeholders = ','.join('?' for _ in fleet_alert_ids)
+        conn.execute(
+            f"""
+            UPDATE device_alerts
+            SET resolved_at = ?
+            WHERE id IN ({placeholders})
+            """,
+            [resolved_at, *fleet_alert_ids]
+        )
+
+
+def get_firmware_expectations() -> List[Dict]:
+    """List the fleet default and device-specific firmware expectations."""
+    conn = get_db_connection()
+    try:
+        rows = conn.execute(
+            """
+            SELECT device_id, expected_version, grace_until, updated_at
+            FROM firmware_expectations
+            ORDER BY
+                CASE WHEN device_id = ? THEN 0 ELSE 1 END,
+                device_id ASC
+            """,
+            (FLEET_EXPECTATION_DEVICE_ID,)
+        ).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            if record['device_id'] == FLEET_EXPECTATION_DEVICE_ID:
+                record['device_id'] = None
+            records.append(record)
+        return records
+    finally:
+        conn.close()
+
+
+def get_device_alerts(
+    device_id: Optional[str] = None,
+    *,
+    active_only: bool = False,
+    limit: int = 100
+) -> List[Dict]:
+    """Return newest alerts with parsed details and lifecycle timestamps."""
+    conn = get_db_connection()
+    try:
+        clauses = []
+        params = []
+        if device_id:
+            clauses.append("device_id = ?")
+            params.append(device_id)
+        if active_only:
+            clauses.append("resolved_at IS NULL")
+        where_clause = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(limit)
+        rows = conn.execute(
+            f"""
+            SELECT
+                id,
+                device_id,
+                alert_type,
+                severity,
+                source_status_id,
+                details_json,
+                detected_at,
+                acknowledged_at,
+                resolved_at
+            FROM device_alerts
+            {where_clause}
+            ORDER BY detected_at DESC, id DESC
+            LIMIT ?
+            """,
+            params
+        ).fetchall()
+        records = []
+        for row in rows:
+            record = dict(row)
+            record['details'] = json.loads(record.pop('details_json'))
+            record['active'] = record['resolved_at'] is None
+            records.append(record)
+        return records
+    finally:
+        conn.close()
+
+
+def acknowledge_device_alert(alert_id: int, acknowledged_at: int) -> bool:
+    """Persist acknowledgement without deleting or resolving the alert."""
+    conn = create_db_connection(use_row_factory=False)
+    try:
+        cursor = conn.execute(
+            """
+            UPDATE device_alerts
+            SET acknowledged_at = COALESCE(acknowledged_at, ?)
+            WHERE id = ?
+            """,
+            (acknowledged_at, alert_id)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
     finally:
         conn.close()
 
@@ -368,6 +767,17 @@ def get_fleet_status() -> List[Dict]:
                     MAX(NULLIF(timestamp, 0)) AS latest_telemetry_at
                 FROM bms_telemetry
                 GROUP BY bms_id
+            ),
+            fleet_expectation AS (
+                SELECT expected_version, grace_until
+                FROM firmware_expectations
+                WHERE device_id = ?
+            ),
+            active_alerts AS (
+                SELECT device_id, COUNT(*) AS active_alert_count
+                FROM device_alerts
+                WHERE resolved_at IS NULL
+                GROUP BY device_id
             )
             SELECT
                 devices.device_id,
@@ -389,7 +799,22 @@ def get_fleet_status() -> List[Dict]:
                 availability.online AS mqtt_online,
                 availability.mqtt_retained AS availability_mqtt_retained,
                 availability.received_at AS availability_received_at,
-                telemetry.latest_telemetry_at
+                telemetry.latest_telemetry_at,
+                COALESCE(
+                    device_expectation.expected_version,
+                    fleet_expectation.expected_version
+                ) AS expected_firmware_version,
+                CASE
+                    WHEN device_expectation.device_id IS NOT NULL
+                        THEN device_expectation.grace_until
+                    ELSE fleet_expectation.grace_until
+                END AS expectation_grace_until,
+                CASE
+                    WHEN device_expectation.device_id IS NOT NULL THEN 'device'
+                    WHEN fleet_expectation.expected_version IS NOT NULL THEN 'fleet'
+                    ELSE NULL
+                END AS expectation_scope,
+                COALESCE(alerts.active_alert_count, 0) AS active_alert_count
             FROM devices
             LEFT JOIN ranked_status AS status
                 ON status.device_id = devices.device_id
@@ -399,8 +824,14 @@ def get_fleet_status() -> List[Dict]:
                AND availability.row_num = 1
             LEFT JOIN latest_telemetry AS telemetry
                 ON telemetry.device_id = devices.device_id
+            LEFT JOIN firmware_expectations AS device_expectation
+                ON device_expectation.device_id = devices.device_id
+            LEFT JOIN fleet_expectation ON 1 = 1
+            LEFT JOIN active_alerts AS alerts
+                ON alerts.device_id = devices.device_id
             ORDER BY devices.device_id ASC
-            """
+            """,
+            (FLEET_EXPECTATION_DEVICE_ID,)
         )
         records = []
         for row in cursor.fetchall():

@@ -106,10 +106,23 @@ Socket.IO connectivity and telemetry freshness.
 The dedicated `/status` page provides a firmware fleet overview and paginated
 per-device boot/OTA history. Its fleet snapshot combines the latest status,
 MQTT availability, and telemetry timestamp for every known device in one SQL
-query. Supporting APIs are:
+query. The same page provides a fleet-wide expected firmware default,
+per-device overrides with optional rollout grace periods, and persistent alert
+history for explicit OTA rollbacks, watchdog resets, and unexpected firmware.
+Alert acknowledgement records operator action without deleting the event;
+later healthy status events resolve active conditions.
+
+Supporting APIs are:
 
 - `GET /api/fleet/status`
 - `GET /api/device-status/history?bms_id=<device_id>&limit=50&before_id=<id>`
+- `GET /api/alerts?device_id=<device_id>&active=true&limit=100`
+- `POST /api/alerts/<alert_id>/acknowledge`
+- `GET /api/firmware-expectations`
+- `PUT /api/firmware-expectations/_fleet`
+- `PUT /api/firmware-expectations/<device_id>`
+- `DELETE /api/firmware-expectations/_fleet`
+- `DELETE /api/firmware-expectations/<device_id>`
 
 The normalized database column order is:
 

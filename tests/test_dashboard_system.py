@@ -38,7 +38,9 @@ def build_status_payload(
     reported_at: int | None = None,
     time_source: str | None = None,
     status_reason: str = "boot",
-    reset_reason: str = "software"
+    reset_reason: str = "software",
+    rollback_from_version: str | None = None,
+    rollback_target_version: str | None = None
 ) -> str:
     payload = {
         "schema_version": schema_version,
@@ -59,8 +61,8 @@ def build_status_payload(
             "reported_at": reported_at,
             "time_source": time_source,
             "status_reason": status_reason,
-            "rollback_from_version": None,
-            "rollback_target_version": None
+            "rollback_from_version": rollback_from_version,
+            "rollback_target_version": rollback_target_version
         })
     return json.dumps(payload)
 
@@ -388,6 +390,170 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(latest["reported_at"], 1785033600)
         self.assertEqual(latest["time_source"], "sntp")
         self.assertEqual(latest["status_reason"], "time_synchronized")
+
+    def test_duplicate_watchdog_status_creates_one_alert(self):
+        topic = "bms/status/gw-watchdog"
+        payload = build_status_payload(
+            "gw-watchdog",
+            schema_version=2,
+            reset_reason="task_watchdog"
+        )
+
+        first_id = bms_mqtt_logger.insert_status_data(payload, topic)
+        duplicate_id = bms_mqtt_logger.insert_status_data(payload, topic)
+        followup_id = bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-watchdog",
+                schema_version=2,
+                status_seq=2,
+                status_reason="time_synchronized",
+                reported_at=int(time.time()),
+                time_source="sntp",
+                reset_reason="task_watchdog"
+            ),
+            topic
+        )
+        alerts = database_queries.get_device_alerts("gw-watchdog")
+
+        self.assertIsNotNone(first_id)
+        self.assertIsNone(duplicate_id)
+        self.assertIsNotNone(followup_id)
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["alert_type"], "watchdog_reset")
+        self.assertEqual(alerts[0]["severity"], "warning")
+        self.assertEqual(alerts[0]["details"]["reset_reason"], "task_watchdog")
+        self.assertTrue(alerts[0]["active"])
+
+    def test_ordinary_reset_does_not_create_alert(self):
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-clean-reset",
+                schema_version=2,
+                reset_reason="software"
+            ),
+            "bms/status/gw-clean-reset"
+        )
+
+        self.assertEqual(
+            database_queries.get_device_alerts("gw-clean-reset"),
+            []
+        )
+
+    def test_explicit_rollback_evidence_creates_critical_alert(self):
+        topic = "bms/status/gw-rollback"
+        for status_seq in (1, 2):
+            bms_mqtt_logger.insert_status_data(
+                build_status_payload(
+                    "gw-rollback",
+                    firmware_version="v1.4.0",
+                    schema_version=2,
+                    status_seq=status_seq,
+                    status_reason="rollback_detected",
+                    rollback_from_version="v1.5.0",
+                    rollback_target_version="v1.4.0"
+                ),
+                topic
+            )
+
+        alerts = database_queries.get_device_alerts("gw-rollback")
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]["alert_type"], "firmware_rollback")
+        self.assertEqual(alerts[0]["severity"], "critical")
+        self.assertEqual(alerts[0]["details"], {
+            "rollback_from_version": "v1.5.0",
+            "rollback_target_version": "v1.4.0"
+        })
+
+    def test_unexpected_firmware_honors_grace_and_tracks_one_episode(self):
+        now = int(time.time())
+        database_queries.set_firmware_expectation(
+            "gw-policy",
+            "v2.0.0",
+            now + 3600,
+            now
+        )
+        topic = "bms/status/gw-policy"
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-policy",
+                firmware_version="v1.0.0",
+                schema_version=2,
+                status_seq=1
+            ),
+            topic
+        )
+        self.assertEqual(database_queries.get_device_alerts("gw-policy"), [])
+
+        database_queries.set_firmware_expectation(
+            "gw-policy",
+            "v2.0.0",
+            now - 1,
+            now
+        )
+        for status_seq in (2, 3):
+            bms_mqtt_logger.insert_status_data(
+                build_status_payload(
+                    "gw-policy",
+                    firmware_version="v1.0.0",
+                    schema_version=2,
+                    status_seq=status_seq
+                ),
+                topic
+            )
+
+        active = database_queries.get_device_alerts(
+            "gw-policy",
+            active_only=True
+        )
+        self.assertEqual(len(active), 1)
+        self.assertEqual(active[0]["alert_type"], "unexpected_firmware")
+        self.assertEqual(active[0]["details"]["expected_version"], "v2.0.0")
+
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-policy",
+                firmware_version="v2.0.0",
+                schema_version=2,
+                status_seq=4
+            ),
+            topic
+        )
+        history = database_queries.get_device_alerts("gw-policy")
+        self.assertEqual(len(history), 1)
+        self.assertFalse(history[0]["active"])
+        self.assertIsNotNone(history[0]["resolved_at"])
+
+    def test_alert_acknowledgement_persists_after_resolution(self):
+        topic = "bms/status/gw-ack"
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-ack",
+                boot_id="watchdog-boot",
+                schema_version=2,
+                reset_reason="interrupt_watchdog"
+            ),
+            topic
+        )
+        alert = database_queries.get_device_alerts("gw-ack")[0]
+        client = dashboard_server.app.test_client()
+        response = client.post(f"/api/alerts/{alert['id']}/acknowledge")
+
+        self.assertEqual(response.status_code, 200)
+        acknowledged = database_queries.get_device_alerts("gw-ack")[0]
+        self.assertIsNotNone(acknowledged["acknowledged_at"])
+
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-ack",
+                boot_id="clean-boot",
+                schema_version=2,
+                reset_reason="software"
+            ),
+            topic
+        )
+        resolved = database_queries.get_device_alerts("gw-ack")[0]
+        self.assertIsNotNone(resolved["acknowledged_at"])
+        self.assertIsNotNone(resolved["resolved_at"])
 
     def test_schema_v2_status_validation_checks_time_pair(self):
         payload = json.loads(build_status_payload("gw-v2-time", schema_version=2))
@@ -768,6 +934,79 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(distribution["v1.9.0"], 1)
         self.assertEqual(distribution["v2.0.0"], 1)
 
+    def test_firmware_expectation_api_and_fleet_alert_summary(self):
+        client = dashboard_server.app.test_client()
+        fleet_default = client.put(
+            "/api/firmware-expectations/_fleet",
+            json={"expected_version": "v2.0.0", "grace_seconds": 0}
+        )
+        override = client.put(
+            "/api/firmware-expectations/gw-expectation",
+            json={"expected_version": "v1.9.0", "grace_seconds": 3600}
+        )
+
+        self.assertEqual(fleet_default.status_code, 200)
+        self.assertEqual(override.status_code, 200)
+        expectations = client.get(
+            "/api/firmware-expectations"
+        ).get_json()["expectations"]
+        self.assertEqual(expectations[0]["device_id"], None)
+        self.assertEqual(expectations[0]["expected_version"], "v2.0.0")
+
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-fleet-policy",
+                firmware_version="v1.0.0",
+                schema_version=2
+            ),
+            "bms/status/gw-fleet-policy"
+        )
+        fleet = client.get("/api/fleet/status").get_json()
+        device = next(
+            item for item in fleet["devices"]
+            if item["device_id"] == "gw-fleet-policy"
+        )
+        self.assertEqual(device["expected_firmware_version"], "v2.0.0")
+        self.assertEqual(device["expectation_scope"], "fleet")
+        self.assertFalse(device["firmware_matches_expectation"])
+        self.assertEqual(device["active_alert_count"], 1)
+        self.assertEqual(fleet["summary"]["active_alert_count"], 1)
+
+        deleted = client.delete(
+            "/api/firmware-expectations/gw-expectation"
+        )
+        self.assertEqual(deleted.status_code, 200)
+
+    def test_alert_and_expectation_apis_validate_inputs(self):
+        client = dashboard_server.app.test_client()
+
+        self.assertEqual(
+            client.get("/api/alerts?active=maybe").status_code,
+            400
+        )
+        self.assertEqual(
+            client.get("/api/alerts?limit=501").status_code,
+            400
+        )
+        self.assertEqual(
+            client.post("/api/alerts/999/acknowledge").status_code,
+            404
+        )
+        self.assertEqual(
+            client.put(
+                "/api/firmware-expectations/gw-test",
+                json={"expected_version": "", "grace_seconds": 0}
+            ).status_code,
+            400
+        )
+        self.assertEqual(
+            client.put(
+                "/api/firmware-expectations/gw-test",
+                json={"expected_version": "v2", "grace_seconds": 2592001}
+            ).status_code,
+            400
+        )
+
     def test_fleet_query_uses_one_database_connection(self):
         original_create_connection = database_queries.create_db_connection
         with mock.patch.object(
@@ -797,6 +1036,8 @@ class DashboardSystemTestCase(unittest.TestCase):
         fleet_html = fleet_response.get_data(as_text=True)
         self.assertIn('id="fleetTableBody"', fleet_html)
         self.assertIn('id="historyTableBody"', fleet_html)
+        self.assertIn('id="alertTableBody"', fleet_html)
+        self.assertIn('id="fleetExpectedFirmware"', fleet_html)
         self.assertIn('href="/status"', dashboard_response.get_data(as_text=True))
 
     def test_auto_view_aggregates_thirty_minute_range(self):

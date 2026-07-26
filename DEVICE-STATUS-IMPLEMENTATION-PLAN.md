@@ -209,8 +209,8 @@ rules have produced useful, low-noise results in production.
 
 Implementation status (2026-07-25): schema-v2 event identity, device time,
 backward-compatible SQLite migration, exact backend deduplication, API clock
-skew, and compatibility tests are implemented. Explicit rollback evidence is
-still pending and remains coupled to the alerting slice.
+skew, compatibility tests, and explicit persisted rollback evidence are
+implemented locally. Production deployment remains pending.
 
 ### Firmware
 
@@ -331,6 +331,12 @@ bounded; it must not load each device's complete history to render one page.
 
 ## Phase 8: Alert rules and lifecycle
 
+Implementation status (2026-07-25): explicit firmware rollback evidence,
+firmware expectation policy with fleet and device scopes, transactional alert
+evaluation, persistent acknowledgement/resolution, REST APIs, fleet-page
+controls, and lifecycle tests are implemented locally. Production deployment
+and real rollback/watchdog canary validation remain pending.
+
 Add a `device_alerts` table containing alert type, severity, device ID,
 source status row, a unique deduplication key, structured details, detection
 time, and acknowledgement/resolution timestamps.
@@ -338,8 +344,9 @@ time, and acknowledgement/resolution timestamps.
 Evaluate rules when a new exact status event is committed:
 
 - `firmware_rollback` (critical): firmware explicitly reports
-  `rollback_detected`. Retain a conservative backend inference only for legacy
-  sequences that show pending verification followed by the prior version.
+  `rollback_detected`. Do not infer rollback from firmware ordering because
+  the backend cannot distinguish a deliberate downgrade from bootloader
+  recovery.
 - `watchdog_reset` (warning or critical): reset reason is
   `interrupt_watchdog`, `task_watchdog`, `watchdog`, or `cpu_lockup`.
 - `unexpected_firmware` (warning): running version differs from the effective
