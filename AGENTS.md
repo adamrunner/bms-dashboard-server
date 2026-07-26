@@ -78,7 +78,7 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 ## Key Configuration
 
 ### Environment Variables (.env)
-- `MQTT_BROKER`: Hostname of MQTT broker (default: `mosquitto` for Docker, `anton` over Tailscale MagicDNS for external access)
+- `MQTT_BROKER`: Hostname of MQTT broker (default: `mosquitto` for Docker; try `anton` over Tailscale MagicDNS first for external access, then `anton.local` when connected directly to the LAN)
 - `MQTT_USERNAME`/`MQTT_PASSWORD`: MQTT authentication
 - `MQTT_TOPIC`: Topic to subscribe to (default: `bms/telemetry/+`)
 - `DATABASE_PATH`: SQLite database location
