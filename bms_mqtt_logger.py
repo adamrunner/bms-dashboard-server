@@ -102,6 +102,15 @@ STATUS_REQUIRED_STRING_FIELDS = {
     'build_date': 32,
     'build_time': 32
 }
+STATUS_V2_REASONS = {
+    'boot',
+    'time_synchronized',
+    'mqtt_reconnected',
+    'ota_pending_verify',
+    'ota_verified',
+    'rollback_detected',
+}
+STATUS_TIME_SOURCES = {'sntp', 'gnss'}
 DEVICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
 
 
@@ -241,7 +250,7 @@ def insert_telemetry_data(csv_data):
 
 
 def normalize_status_payload(payload: str, topic: str, mqtt_retained: bool = False) -> dict:
-    """Validate and normalize one schema-v1 device status JSON payload."""
+    """Validate and normalize one schema-v1 or schema-v2 status document."""
     try:
         parsed = json.loads(payload)
     except json.JSONDecodeError as exc:
@@ -251,7 +260,7 @@ def normalize_status_payload(payload: str, topic: str, mqtt_retained: bool = Fal
         raise ValueError("status payload must be a JSON object")
     if type(parsed.get('schema_version')) is not int:
         raise ValueError("schema_version must be an integer")
-    if parsed['schema_version'] != 1:
+    if parsed['schema_version'] not in (1, 2):
         raise ValueError(f"unsupported schema_version {parsed['schema_version']}")
 
     for field, max_length in STATUS_REQUIRED_STRING_FIELDS.items():
@@ -275,6 +284,47 @@ def normalize_status_payload(payload: str, topic: str, mqtt_retained: bool = Fal
             f"topic device ID {topic_device_id!r} does not match payload {device_id!r}"
         )
 
+    status_seq = None
+    reported_at = None
+    time_source = None
+    status_reason = None
+    rollback_from_version = None
+    rollback_target_version = None
+    if parsed['schema_version'] == 2:
+        status_seq = parsed.get('status_seq')
+        if type(status_seq) is not int or not 1 <= status_seq <= 0xffffffff:
+            raise ValueError("status_seq must be an unsigned 32-bit integer greater than zero")
+
+        reported_at = parsed.get('reported_at')
+        time_source = parsed.get('time_source')
+        if reported_at is None:
+            if time_source is not None:
+                raise ValueError("time_source must be null when reported_at is null")
+        else:
+            if type(reported_at) is not int or reported_at <= 0:
+                raise ValueError("reported_at must be a positive Unix timestamp or null")
+            if time_source not in STATUS_TIME_SOURCES:
+                raise ValueError("time_source must be sntp or gnss when reported_at is set")
+
+        status_reason = parsed.get('status_reason')
+        if status_reason not in STATUS_V2_REASONS:
+            raise ValueError("status_reason is unsupported")
+
+        rollback_from_version = parsed.get('rollback_from_version')
+        rollback_target_version = parsed.get('rollback_target_version')
+        for field, value in (
+            ('rollback_from_version', rollback_from_version),
+            ('rollback_target_version', rollback_target_version),
+        ):
+            if value is not None and (
+                not isinstance(value, str) or not value or len(value) > 32
+            ):
+                raise ValueError(f"{field} must be a non-empty string up to 32 characters or null")
+        if status_reason == 'rollback_detected' and (
+            rollback_from_version is None or rollback_target_version is None
+        ):
+            raise ValueError("rollback_detected requires both rollback version fields")
+
     canonical_payload = json.dumps(parsed, sort_keys=True, separators=(',', ':'))
     return {
         'device_id': device_id,
@@ -287,6 +337,12 @@ def normalize_status_payload(payload: str, topic: str, mqtt_retained: bool = Fal
         'idf_version': parsed['idf_version'],
         'build_date': parsed['build_date'],
         'build_time': parsed['build_time'],
+        'status_seq': status_seq,
+        'reported_at': reported_at,
+        'time_source': time_source,
+        'status_reason': status_reason,
+        'rollback_from_version': rollback_from_version,
+        'rollback_target_version': rollback_target_version,
         'reported_online': parsed['online'],
         'mqtt_retained': bool(mqtt_retained),
         'payload_sha256': hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest(),
@@ -301,9 +357,10 @@ def insert_status_data(payload: str, topic: str, mqtt_retained: bool = False):
     row_id = insert_device_status_checkin(status)
     if row_id is None:
         logger.info(
-            "Ignored duplicate retained status for %s boot %s",
+            "Ignored duplicate status for %s boot %s sequence %s",
             status['device_id'],
-            status['boot_id']
+            status['boot_id'],
+            status.get('status_seq')
         )
     else:
         logger.info(

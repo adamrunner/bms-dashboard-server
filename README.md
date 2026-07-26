@@ -88,11 +88,13 @@ row starts with 23 fixed columns (including the BMS identifier), followed by
 SQLite schema stores up to four cells and three temperatures; missing values
 are padded with `NULL`, while larger or inconsistent rows are rejected.
 
-Devices may also publish retained schema-v1 JSON status records to
-`bms/status/<device_id>`. The logger stores boot, firmware, OTA verification,
-reset-reason, and build metadata separately from telemetry. Retained broker
-replays are deduplicated so restarting the logger does not manufacture status
-history.
+Devices may also publish retained schema-v1 or schema-v2 JSON status records
+to `bms/status/<device_id>`. The logger stores boot, firmware, OTA
+verification, reset-reason, and build metadata separately from telemetry.
+Schema v2 adds boot-scoped `status_seq`, device `reported_at`, time source, and
+status reason fields. Its `(device_id, boot_id, status_seq)` identity is
+deduplicated exactly; retained schema-v1 replays continue to use the legacy
+payload heuristic.
 
 The normalized database column order is:
 

@@ -53,11 +53,25 @@ DEVICE_STATUS_VIEW_COLUMNS = [
     'idf_version',
     'build_date',
     'build_time',
+    'status_seq',
+    'reported_at',
+    'time_source',
+    'status_reason',
+    'rollback_from_version',
+    'rollback_target_version',
     'reported_online',
     'mqtt_retained',
     'received_at'
 ]
 DEVICE_STATUS_VIEW_COLUMN_SQL = ', '.join(DEVICE_STATUS_VIEW_COLUMNS)
+DEVICE_STATUS_V2_COLUMNS = {
+    'status_seq': 'INTEGER',
+    'reported_at': 'INTEGER',
+    'time_source': 'TEXT',
+    'status_reason': 'TEXT',
+    'rollback_from_version': 'TEXT',
+    'rollback_target_version': 'TEXT',
+}
 
 
 def create_db_connection(*, use_row_factory: bool = True) -> sqlite3.Connection:
@@ -81,6 +95,22 @@ def ensure_database_schema() -> None:
     try:
         with open(SCHEMA_PATH, 'r', encoding='utf-8') as schema_file:
             conn.executescript(schema_file.read())
+        existing_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(device_status_checkins)")
+        }
+        for column, sql_type in DEVICE_STATUS_V2_COLUMNS.items():
+            if column not in existing_columns:
+                conn.execute(
+                    f"ALTER TABLE device_status_checkins ADD COLUMN {column} {sql_type}"
+                )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_device_status_exact_event
+            ON device_status_checkins(device_id, boot_id, status_seq)
+            WHERE status_seq IS NOT NULL
+            """
+        )
         conn.commit()
     finally:
         conn.close()
@@ -110,11 +140,11 @@ def validate_database_schema() -> None:
 
 
 def insert_device_status_checkin(status: Dict) -> Optional[int]:
-    """Insert a normalized device status, suppressing duplicate retained replay."""
+    """Insert status, exactly deduplicating v2 and heuristically deduplicating v1."""
     conn = create_db_connection(use_row_factory=False)
     try:
         cursor = conn.cursor()
-        if status['mqtt_retained']:
+        if status.get('status_seq') is None and status['mqtt_retained']:
             cursor.execute(
                 """
                 SELECT id
@@ -143,9 +173,12 @@ def insert_device_status_checkin(status: Dict) -> Optional[int]:
             INSERT INTO device_status_checkins (
                 device_id, schema_version, firmware_version, ota_slot,
                 pending_verify, boot_id, reset_reason, idf_version,
-                build_date, build_time, reported_online, mqtt_retained,
-                payload_sha256, raw_payload, received_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                build_date, build_time, status_seq, reported_at, time_source,
+                status_reason, rollback_from_version, rollback_target_version,
+                reported_online, mqtt_retained, payload_sha256, raw_payload,
+                received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
             """,
             (
                 status['device_id'],
@@ -158,6 +191,12 @@ def insert_device_status_checkin(status: Dict) -> Optional[int]:
                 status.get('idf_version'),
                 status.get('build_date'),
                 status.get('build_time'),
+                status.get('status_seq'),
+                status.get('reported_at'),
+                status.get('time_source'),
+                status.get('status_reason'),
+                status.get('rollback_from_version'),
+                status.get('rollback_target_version'),
                 status['reported_online'],
                 status['mqtt_retained'],
                 status['payload_sha256'],
@@ -165,6 +204,8 @@ def insert_device_status_checkin(status: Dict) -> Optional[int]:
                 status['received_at']
             )
         )
+        if cursor.rowcount == 0:
+            return None
         row_id = cursor.lastrowid
         conn.commit()
         return row_id

@@ -74,8 +74,10 @@ rejecting inconsistent or larger rows.
 
 Retained JSON boot and OTA records published to
 `bms/status/<device_id>` are persisted in `device_status_checkins`. The
-dashboard displays the latest record for the selected device. Because these
-messages are sent at boot, reconnect, and OTA verification rather than on a
+dashboard displays the latest record for the selected device. Schema v2 adds
+exact boot-scoped event identity plus device time and its GNSS/SNTP source;
+schema v1 remains accepted during rollout. Because these messages are sent at
+boot, reconnect, time synchronization, and OTA verification rather than on a
 fixed heartbeat, they are presented as status check-ins rather than current
 online/offline state.
 

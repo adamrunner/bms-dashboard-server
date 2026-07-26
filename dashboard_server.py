@@ -177,6 +177,10 @@ def background_monitor():
                         0,
                         current_time - latest_status['received_at']
                     )
+                    if latest_status.get('reported_at') is not None:
+                        latest_status['reported_clock_skew_seconds'] = (
+                            latest_status['received_at'] - latest_status['reported_at']
+                        )
                     socketio.server.emit(
                         'device_status_update',
                         latest_status,
@@ -289,6 +293,10 @@ def api_latest_device_status():
         if not status:
             return jsonify({})
         status['received_age_seconds'] = max(0, int(time.time()) - status['received_at'])
+        if status.get('reported_at') is not None:
+            status['reported_clock_skew_seconds'] = (
+                status['received_at'] - status['reported_at']
+            )
         return jsonify(status)
     except Exception as e:
         print(f"Error fetching latest device status: {e}")

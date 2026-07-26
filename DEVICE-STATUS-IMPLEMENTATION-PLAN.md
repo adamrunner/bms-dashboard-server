@@ -207,6 +207,11 @@ rules have produced useful, low-noise results in production.
 
 ## Phase 5: Exact identity and device time
 
+Implementation status (2026-07-25): schema-v2 event identity, device time,
+backward-compatible SQLite migration, exact backend deduplication, API clock
+skew, and compatibility tests are implemented. Explicit rollback evidence is
+still pending and remains coupled to the alerting slice.
+
 ### Firmware
 
 1. Add a boot-scoped status-event builder that owns `status_seq`, status

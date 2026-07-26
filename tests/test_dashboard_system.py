@@ -2,6 +2,7 @@ import tempfile
 import time
 import unittest
 import json
+import sqlite3
 from pathlib import Path
 from unittest import mock
 
@@ -31,10 +32,15 @@ def build_status_payload(
     *,
     firmware_version: str = "9217453",
     boot_id: str = "0123456789abcdef",
-    pending_verify: bool = False
+    pending_verify: bool = False,
+    schema_version: int = 1,
+    status_seq: int = 1,
+    reported_at: int | None = None,
+    time_source: str | None = None,
+    status_reason: str = "boot"
 ) -> str:
-    return json.dumps({
-        "schema_version": 1,
+    payload = {
+        "schema_version": schema_version,
         "device_id": device_id,
         "online": True,
         "firmware_version": firmware_version,
@@ -45,7 +51,17 @@ def build_status_payload(
         "idf_version": "v5.5",
         "build_date": "Jul 25 2026",
         "build_time": "17:43:00"
-    })
+    }
+    if schema_version == 2:
+        payload.update({
+            "status_seq": status_seq,
+            "reported_at": reported_at,
+            "time_source": time_source,
+            "status_reason": status_reason,
+            "rollback_from_version": None,
+            "rollback_target_version": None
+        })
+    return json.dumps(payload)
 
 
 class DashboardSystemTestCase(unittest.TestCase):
@@ -137,11 +153,72 @@ class DashboardSystemTestCase(unittest.TestCase):
                 WHERE type = 'table' AND name = 'device_status_checkins'
                 """
             ).fetchone()
+            columns = {
+                column["name"]
+                for column in conn.execute("PRAGMA table_info(device_status_checkins)")
+            }
+            exact_index = conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'index' AND name = 'idx_device_status_exact_event'
+                """
+            ).fetchone()
         finally:
             conn.close()
 
         self.assertEqual(row["name"], "device_status_checkins")
+        self.assertTrue({
+            "status_seq",
+            "reported_at",
+            "time_source",
+            "status_reason",
+            "rollback_from_version",
+            "rollback_target_version"
+        }.issubset(columns))
+        self.assertEqual(exact_index["name"], "idx_device_status_exact_event")
         database_queries.validate_database_schema()
+
+    def test_status_v2_migration_upgrades_existing_table(self):
+        legacy_path = str(Path(self.temp_dir.name) / "legacy_status.db")
+        conn = sqlite3.connect(legacy_path)
+        conn.executescript(
+            """
+            CREATE TABLE device_status_checkins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                firmware_version TEXT NOT NULL,
+                ota_slot TEXT NOT NULL,
+                pending_verify BOOLEAN NOT NULL,
+                boot_id TEXT NOT NULL,
+                reset_reason TEXT NOT NULL,
+                idf_version TEXT,
+                build_date TEXT,
+                build_time TEXT,
+                reported_online BOOLEAN NOT NULL,
+                mqtt_retained BOOLEAN NOT NULL DEFAULT 0,
+                payload_sha256 TEXT NOT NULL,
+                raw_payload TEXT NOT NULL,
+                received_at INTEGER NOT NULL
+            );
+            """
+        )
+        conn.close()
+
+        database_queries.DATABASE_PATH = legacy_path
+        database_queries.ensure_database_schema()
+        migrated = database_queries.create_db_connection()
+        try:
+            columns = {
+                column["name"]
+                for column in migrated.execute(
+                    "PRAGMA table_info(device_status_checkins)"
+                )
+            }
+        finally:
+            migrated.close()
+
+        self.assertTrue(set(database_queries.DEVICE_STATUS_V2_COLUMNS).issubset(columns))
 
     def test_valid_status_is_normalized_and_inserted(self):
         payload = build_status_payload("gw-status")
@@ -187,7 +264,7 @@ class DashboardSystemTestCase(unittest.TestCase):
             )
 
         unsupported = json.loads(build_status_payload("gw-schema"))
-        unsupported["schema_version"] = 2
+        unsupported["schema_version"] = 3
         with self.assertRaisesRegex(ValueError, "unsupported schema_version"):
             bms_mqtt_logger.normalize_status_payload(
                 json.dumps(unsupported),
@@ -234,6 +311,50 @@ class DashboardSystemTestCase(unittest.TestCase):
 
         self.assertNotEqual(first_id, second_id)
         self.assertEqual(self.count_status_rows("gw-live"), 2)
+
+    def test_schema_v2_status_events_are_exactly_deduplicated(self):
+        topic = "bms/status/gw-v2"
+        first = build_status_payload(
+            "gw-v2",
+            schema_version=2,
+            status_seq=1
+        )
+        second = build_status_payload(
+            "gw-v2",
+            schema_version=2,
+            status_seq=2,
+            reported_at=1785033600,
+            time_source="sntp",
+            status_reason="time_synchronized"
+        )
+
+        first_id = bms_mqtt_logger.insert_status_data(first, topic, mqtt_retained=False)
+        duplicate_id = bms_mqtt_logger.insert_status_data(
+            first,
+            topic,
+            mqtt_retained=False
+        )
+        second_id = bms_mqtt_logger.insert_status_data(second, topic, mqtt_retained=False)
+
+        self.assertIsNotNone(first_id)
+        self.assertIsNone(duplicate_id)
+        self.assertIsNotNone(second_id)
+        self.assertEqual(self.count_status_rows("gw-v2"), 2)
+        latest = database_queries.get_latest_device_status("gw-v2")
+        self.assertEqual(latest["status_seq"], 2)
+        self.assertEqual(latest["reported_at"], 1785033600)
+        self.assertEqual(latest["time_source"], "sntp")
+        self.assertEqual(latest["status_reason"], "time_synchronized")
+
+    def test_schema_v2_status_validation_checks_time_pair(self):
+        payload = json.loads(build_status_payload("gw-v2-time", schema_version=2))
+        payload["time_source"] = "gnss"
+
+        with self.assertRaisesRegex(ValueError, "time_source must be null"):
+            bms_mqtt_logger.normalize_status_payload(
+                json.dumps(payload),
+                "bms/status/gw-v2-time"
+            )
 
     def test_secret_and_mqtt_config_use_development_fallbacks(self):
         with mock.patch.dict('os.environ', {'APP_ENV': 'development'}, clear=False):
@@ -325,8 +446,16 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(payload["records"][0]["pack_voltage_v"], 13.4)
 
     def test_latest_device_status_api_and_device_id_union(self):
+        reported_at = int(time.time()) - 2
         bms_mqtt_logger.insert_status_data(
-            build_status_payload("gw-status-only", pending_verify=True),
+            build_status_payload(
+                "gw-status-only",
+                pending_verify=True,
+                schema_version=2,
+                reported_at=reported_at,
+                time_source="gnss",
+                status_reason="ota_pending_verify"
+            ),
             "bms/status/gw-status-only",
             mqtt_retained=True
         )
@@ -345,6 +474,9 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(status["device_id"], "gw-status-only")
         self.assertTrue(status["pending_verify"])
         self.assertTrue(status["mqtt_retained"])
+        self.assertEqual(status["reported_at"], reported_at)
+        self.assertEqual(status["time_source"], "gnss")
+        self.assertIn("reported_clock_skew_seconds", status)
         self.assertIn("received_age_seconds", status)
         self.assertEqual(missing_id_response.status_code, 400)
         self.assertEqual(unknown_response.get_json(), {})
