@@ -276,6 +276,153 @@ def get_latest_status_record_id() -> Optional[int]:
         conn.close()
 
 
+def get_device_status_history(
+    device_id: str,
+    limit: int = 50,
+    before_id: Optional[int] = None
+) -> Tuple[List[Dict], Optional[int]]:
+    """Return stable, newest-first status history with ID-based pagination."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        params = [device_id]
+        before_clause = ""
+        if before_id is not None:
+            before_clause = "AND id < ?"
+            params.append(before_id)
+        params.append(limit + 1)
+        cursor.execute(
+            f"""
+            SELECT {DEVICE_STATUS_VIEW_COLUMN_SQL}
+            FROM device_status_checkins
+            WHERE device_id = ?
+              {before_clause}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            params
+        )
+        rows = cursor.fetchall()
+        has_more = len(rows) > limit
+        page_rows = rows[:limit]
+        records = [_normalize_status_row(row) for row in page_rows]
+        next_before_id = records[-1]['id'] if has_more and records else None
+        return records, next_before_id
+    finally:
+        conn.close()
+
+
+def get_fleet_status() -> List[Dict]:
+    """Return one bounded latest-state row per known device in one SQL query."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            WITH devices AS (
+                SELECT bms_id AS device_id FROM bms_telemetry
+                UNION
+                SELECT device_id FROM device_status_checkins
+                UNION
+                SELECT device_id FROM device_availability_events
+            ),
+            ranked_status AS (
+                SELECT
+                    id,
+                    device_id,
+                    schema_version,
+                    firmware_version,
+                    ota_slot,
+                    pending_verify,
+                    boot_id,
+                    reset_reason,
+                    status_seq,
+                    reported_at,
+                    time_source,
+                    status_reason,
+                    mqtt_retained,
+                    received_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY device_id
+                        ORDER BY received_at DESC, id DESC
+                    ) AS row_num
+                FROM device_status_checkins
+            ),
+            ranked_availability AS (
+                SELECT
+                    id,
+                    device_id,
+                    boot_id,
+                    online,
+                    mqtt_retained,
+                    received_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY device_id
+                        ORDER BY received_at DESC, id DESC
+                    ) AS row_num
+                FROM device_availability_events
+            ),
+            latest_telemetry AS (
+                SELECT
+                    bms_id AS device_id,
+                    MAX(NULLIF(timestamp, 0)) AS latest_telemetry_at
+                FROM bms_telemetry
+                GROUP BY bms_id
+            )
+            SELECT
+                devices.device_id,
+                status.id AS status_id,
+                status.schema_version,
+                status.firmware_version,
+                status.ota_slot,
+                status.pending_verify,
+                status.boot_id,
+                status.reset_reason,
+                status.status_seq,
+                status.reported_at,
+                status.time_source,
+                status.status_reason,
+                status.mqtt_retained AS status_mqtt_retained,
+                status.received_at AS status_received_at,
+                availability.id AS availability_id,
+                availability.boot_id AS availability_boot_id,
+                availability.online AS mqtt_online,
+                availability.mqtt_retained AS availability_mqtt_retained,
+                availability.received_at AS availability_received_at,
+                telemetry.latest_telemetry_at
+            FROM devices
+            LEFT JOIN ranked_status AS status
+                ON status.device_id = devices.device_id
+               AND status.row_num = 1
+            LEFT JOIN ranked_availability AS availability
+                ON availability.device_id = devices.device_id
+               AND availability.row_num = 1
+            LEFT JOIN latest_telemetry AS telemetry
+                ON telemetry.device_id = devices.device_id
+            ORDER BY devices.device_id ASC
+            """
+        )
+        records = []
+        for row in cursor.fetchall():
+            record = dict(row)
+            if record['pending_verify'] is not None:
+                record['pending_verify'] = bool(record['pending_verify'])
+            if record['status_mqtt_retained'] is not None:
+                record['status_mqtt_retained'] = bool(
+                    record['status_mqtt_retained']
+                )
+            if record['mqtt_online'] is not None:
+                record['mqtt_online'] = bool(record['mqtt_online'])
+            if record['availability_mqtt_retained'] is not None:
+                record['availability_mqtt_retained'] = bool(
+                    record['availability_mqtt_retained']
+                )
+            records.append(record)
+        return records
+    finally:
+        conn.close()
+
+
 def insert_device_availability_event(availability: Dict) -> Optional[int]:
     """Insert a real availability transition, suppressing repeated state."""
     conn = create_db_connection(use_row_factory=False)

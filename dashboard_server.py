@@ -14,7 +14,8 @@ from database_queries import (
     get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds,
     should_aggregate_view, ensure_database_schema, validate_database_schema,
     get_latest_record_id, get_latest_device_status, get_latest_status_record_id,
-    get_latest_device_availability, get_latest_availability_record_id
+    get_latest_device_availability, get_latest_availability_record_id,
+    get_device_status_history, get_fleet_status
 )
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
@@ -247,6 +248,12 @@ def dashboard():
     return render_template('dashboard.html')
 
 
+@app.route('/status')
+def fleet_status_page():
+    """Serve the device status history and firmware fleet page."""
+    return render_template('fleet_status.html')
+
+
 @app.route('/api/data')
 def api_data():
     """API endpoint to get telemetry data"""
@@ -332,6 +339,123 @@ def api_latest_device_status():
         return jsonify(status)
     except Exception as e:
         print(f"Error fetching latest device status: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/device-status/history')
+def api_device_status_history():
+    """Return bounded, stable status history for one device."""
+    bms_id = request.args.get('bms_id', default=None, type=str)
+    if not bms_id:
+        return jsonify({'error': 'bms_id is required'}), 400
+
+    raw_limit = request.args.get('limit', default='50', type=str)
+    raw_before_id = request.args.get('before_id', default=None, type=str)
+    try:
+        limit = int(raw_limit)
+        if not 1 <= limit <= 100:
+            raise ValueError
+        before_id = int(raw_before_id) if raw_before_id is not None else None
+        if before_id is not None and before_id <= 0:
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({
+            'error': 'limit must be 1..100 and before_id must be a positive integer'
+        }), 400
+
+    try:
+        records, next_before_id = get_device_status_history(
+            bms_id,
+            limit,
+            before_id
+        )
+        now = int(time.time())
+        for status in records:
+            status['received_age_seconds'] = max(
+                0,
+                now - status['received_at']
+            )
+            if status.get('reported_at') is not None:
+                status['reported_clock_skew_seconds'] = (
+                    status['received_at'] - status['reported_at']
+                )
+        return jsonify({
+            'records': records,
+            'next_before_id': next_before_id
+        })
+    except Exception as e:
+        print(f"Error fetching device status history: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
+@app.route('/api/fleet/status')
+def api_fleet_status():
+    """Return the latest firmware, availability, and telemetry fleet state."""
+    try:
+        devices = get_fleet_status()
+        now = int(time.time())
+        firmware_counts = {}
+        online_count = 0
+        offline_count = 0
+        unknown_availability_count = 0
+        pending_verify_count = 0
+
+        for device in devices:
+            if device['status_received_at'] is not None:
+                device['status_age_seconds'] = max(
+                    0,
+                    now - device['status_received_at']
+                )
+            else:
+                device['status_age_seconds'] = None
+
+            if device['availability_received_at'] is not None:
+                device['availability_age_seconds'] = max(
+                    0,
+                    now - device['availability_received_at']
+                )
+            else:
+                device['availability_age_seconds'] = None
+
+            if device['latest_telemetry_at'] is not None:
+                device['telemetry_age_seconds'] = max(
+                    0,
+                    now - device['latest_telemetry_at']
+                )
+            else:
+                device['telemetry_age_seconds'] = None
+
+            version = device['firmware_version'] or 'Unknown'
+            firmware_counts[version] = firmware_counts.get(version, 0) + 1
+            pending_verify_count += int(device['pending_verify'] is True)
+            if device['mqtt_online'] is True:
+                online_count += 1
+            elif device['mqtt_online'] is False:
+                offline_count += 1
+            else:
+                unknown_availability_count += 1
+
+        firmware_versions = [
+            {'version': version, 'count': count}
+            for version, count in sorted(
+                firmware_counts.items(),
+                key=lambda item: (-item[1], item[0])
+            )
+        ]
+        return jsonify({
+            'generated_at': now,
+            'summary': {
+                'device_count': len(devices),
+                'online_count': online_count,
+                'offline_count': offline_count,
+                'unknown_availability_count': unknown_availability_count,
+                'pending_verify_count': pending_verify_count,
+                'firmware_versions': firmware_versions
+            },
+            'devices': devices
+        })
+    except Exception as e:
+        print(f"Error fetching fleet status: {e}")
         return jsonify({'error': str(e)}), 500
 
 

@@ -63,6 +63,15 @@
     font-family: var(--bs-font-monospace);
 }
 
+.fleet-table td {
+    white-space: nowrap;
+}
+
+#historyTableBody td:nth-child(6) {
+    font-family: var(--bs-font-monospace);
+    font-size: 0.85rem;
+}
+
 #lastUpdate {
     margin-right: var(--last-update-margin);
 }

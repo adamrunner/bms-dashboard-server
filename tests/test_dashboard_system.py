@@ -37,7 +37,8 @@ def build_status_payload(
     status_seq: int = 1,
     reported_at: int | None = None,
     time_source: str | None = None,
-    status_reason: str = "boot"
+    status_reason: str = "boot",
+    reset_reason: str = "software"
 ) -> str:
     payload = {
         "schema_version": schema_version,
@@ -47,7 +48,7 @@ def build_status_payload(
         "ota_slot": "ota_1",
         "pending_verify": pending_verify,
         "boot_id": boot_id,
-        "reset_reason": "software",
+        "reset_reason": reset_reason,
         "idf_version": "v5.5",
         "build_date": "Jul 25 2026",
         "build_time": "17:43:00"
@@ -633,6 +634,151 @@ class DashboardSystemTestCase(unittest.TestCase):
             database_queries.get_available_bms_ids()
         )
 
+    def test_status_history_api_has_stable_id_pagination(self):
+        topic = "bms/status/gw-history"
+        for status_seq in (1, 2, 3):
+            bms_mqtt_logger.insert_status_data(
+                build_status_payload(
+                    "gw-history",
+                    schema_version=2,
+                    status_seq=status_seq,
+                    status_reason=(
+                        "boot" if status_seq == 1 else "mqtt_reconnected"
+                    )
+                ),
+                topic,
+                mqtt_retained=False
+            )
+
+        client = dashboard_server.app.test_client()
+        first_response = client.get(
+            "/api/device-status/history?bms_id=gw-history&limit=2"
+        )
+        first_page = first_response.get_json()
+
+        self.assertEqual(first_response.status_code, 200)
+        self.assertEqual(
+            [record["status_seq"] for record in first_page["records"]],
+            [3, 2]
+        )
+        self.assertIsNotNone(first_page["next_before_id"])
+
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-history",
+                schema_version=2,
+                status_seq=4,
+                status_reason="mqtt_reconnected"
+            ),
+            topic,
+            mqtt_retained=False
+        )
+        second_response = client.get(
+            "/api/device-status/history"
+            f"?bms_id=gw-history&limit=2"
+            f"&before_id={first_page['next_before_id']}"
+        )
+        second_page = second_response.get_json()
+
+        self.assertEqual(second_response.status_code, 200)
+        self.assertEqual(
+            [record["status_seq"] for record in second_page["records"]],
+            [1]
+        )
+        self.assertIsNone(second_page["next_before_id"])
+
+    def test_status_history_api_validates_pagination(self):
+        client = dashboard_server.app.test_client()
+
+        self.assertEqual(
+            client.get("/api/device-status/history").status_code,
+            400
+        )
+        self.assertEqual(
+            client.get(
+                "/api/device-status/history?bms_id=gw-test&limit=101"
+            ).status_code,
+            400
+        )
+        self.assertEqual(
+            client.get(
+                "/api/device-status/history?bms_id=gw-test&before_id=nope"
+            ).status_code,
+            400
+        )
+
+    def test_fleet_status_api_combines_mixed_device_sources(self):
+        now = int(time.time())
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-complete", now)
+        )
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-telemetry-only", now - 10)
+        )
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-complete",
+                firmware_version="v2.0.0",
+                schema_version=2
+            ),
+            "bms/status/gw-complete"
+        )
+        bms_mqtt_logger.insert_status_data(
+            build_status_payload(
+                "gw-status-only",
+                firmware_version="v1.9.0",
+                pending_verify=True
+            ),
+            "bms/status/gw-status-only"
+        )
+        bms_mqtt_logger.insert_availability_data(
+            build_availability_payload("gw-complete", online=True),
+            "bms/availability/gw-complete"
+        )
+        bms_mqtt_logger.insert_availability_data(
+            build_availability_payload("gw-availability-only", online=False),
+            "bms/availability/gw-availability-only"
+        )
+
+        response = dashboard_server.app.test_client().get("/api/fleet/status")
+        payload = response.get_json()
+        devices = {
+            device["device_id"]: device
+            for device in payload["devices"]
+        }
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["summary"]["device_count"], 4)
+        self.assertEqual(payload["summary"]["online_count"], 1)
+        self.assertEqual(payload["summary"]["offline_count"], 1)
+        self.assertEqual(payload["summary"]["unknown_availability_count"], 2)
+        self.assertEqual(payload["summary"]["pending_verify_count"], 1)
+        self.assertEqual(devices["gw-complete"]["firmware_version"], "v2.0.0")
+        self.assertTrue(devices["gw-complete"]["mqtt_online"])
+        self.assertIsNotNone(devices["gw-complete"]["telemetry_age_seconds"])
+        self.assertIsNone(devices["gw-telemetry-only"]["status_id"])
+        self.assertIsNone(devices["gw-status-only"]["mqtt_online"])
+        self.assertFalse(devices["gw-availability-only"]["mqtt_online"])
+
+        distribution = {
+            item["version"]: item["count"]
+            for item in payload["summary"]["firmware_versions"]
+        }
+        self.assertEqual(distribution["Unknown"], 2)
+        self.assertEqual(distribution["v1.9.0"], 1)
+        self.assertEqual(distribution["v2.0.0"], 1)
+
+    def test_fleet_query_uses_one_database_connection(self):
+        original_create_connection = database_queries.create_db_connection
+        with mock.patch.object(
+            database_queries,
+            "create_db_connection",
+            wraps=original_create_connection
+        ) as create_connection:
+            database_queries.get_fleet_status()
+
+        self.assertEqual(create_connection.call_count, 1)
+
     def test_dashboard_contains_mqtt_availability_badge(self):
         response = dashboard_server.app.test_client().get("/")
 
@@ -641,6 +787,17 @@ class DashboardSystemTestCase(unittest.TestCase):
             'id="deviceAvailabilityBadge"',
             response.get_data(as_text=True)
         )
+
+    def test_fleet_status_page_and_dashboard_navigation_are_available(self):
+        client = dashboard_server.app.test_client()
+        fleet_response = client.get("/status")
+        dashboard_response = client.get("/")
+
+        self.assertEqual(fleet_response.status_code, 200)
+        fleet_html = fleet_response.get_data(as_text=True)
+        self.assertIn('id="fleetTableBody"', fleet_html)
+        self.assertIn('id="historyTableBody"', fleet_html)
+        self.assertIn('href="/status"', dashboard_response.get_data(as_text=True))
 
     def test_auto_view_aggregates_thirty_minute_range(self):
         now = int(time.time())

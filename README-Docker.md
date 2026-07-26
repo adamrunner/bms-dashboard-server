@@ -94,7 +94,7 @@ To connect to an external MQTT broker instead of the internal Mosquitto service:
 
 ```bash
 # In your .env file
-MQTT_BROKER=anton.local          # External broker hostname
+MQTT_BROKER=anton                # Tailscale MagicDNS hostname
 MQTT_PORT=1883
 MQTT_USERNAME=your-username
 MQTT_PASSWORD=your-password

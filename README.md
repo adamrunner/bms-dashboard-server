@@ -103,6 +103,14 @@ transitions in `device_availability_events`, suppresses retained replays of an
 unchanged state, and displays the latest transition separately from browser
 Socket.IO connectivity and telemetry freshness.
 
+The dedicated `/status` page provides a firmware fleet overview and paginated
+per-device boot/OTA history. Its fleet snapshot combines the latest status,
+MQTT availability, and telemetry timestamp for every known device in one SQL
+query. Supporting APIs are:
+
+- `GET /api/fleet/status`
+- `GET /api/device-status/history?bms_id=<device_id>&limit=50&before_id=<id>`
+
 The normalized database column order is:
 
 1. `bms_id`

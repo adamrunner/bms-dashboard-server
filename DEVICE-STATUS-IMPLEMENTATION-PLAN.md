@@ -292,6 +292,11 @@ pending.
 
 ## Phase 7: Status history and fleet overview
 
+Implementation status (2026-07-25): bounded ID-based status pagination, the
+single-query fleet read model, firmware distribution summary, client-side
+device/version/availability filters, dashboard navigation, and the dedicated
+status page are implemented locally. Production deployment remains pending.
+
 Add APIs with bounded pagination:
 
 ```text
