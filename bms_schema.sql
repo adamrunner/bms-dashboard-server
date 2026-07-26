@@ -2,6 +2,7 @@ CREATE TABLE IF NOT EXISTS bms_telemetry (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     bms_id TEXT NOT NULL,
     timestamp INTEGER NOT NULL,
+    timestamp_valid BOOLEAN NOT NULL DEFAULT 1,
     elapsed_seconds REAL,
     elapsed_hms TEXT,
     total_energy_wh REAL,

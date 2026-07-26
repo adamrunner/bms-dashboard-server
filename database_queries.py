@@ -89,6 +89,9 @@ DEVICE_STATUS_V2_COLUMNS = {
     'rollback_from_version': 'TEXT',
     'rollback_target_version': 'TEXT',
 }
+TELEMETRY_POLICY_COLUMNS = {
+    'timestamp_valid': 'BOOLEAN NOT NULL DEFAULT 1',
+}
 
 
 def create_db_connection(*, use_row_factory: bool = True) -> sqlite3.Connection:
@@ -121,6 +124,25 @@ def ensure_database_schema() -> None:
                 conn.execute(
                     f"ALTER TABLE device_status_checkins ADD COLUMN {column} {sql_type}"
                 )
+        telemetry_columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(bms_telemetry)")
+        }
+        for column, sql_type in TELEMETRY_POLICY_COLUMNS.items():
+            if column not in telemetry_columns:
+                conn.execute(
+                    f"ALTER TABLE bms_telemetry ADD COLUMN {column} {sql_type}"
+                )
+        # A zero/negative gateway timestamp means capture occurred before wall
+        # clock synchronization. Preserve the sample, but never treat the
+        # sentinel as ordinary historical time.
+        conn.execute(
+            """
+            UPDATE bms_telemetry
+            SET timestamp_valid = 0
+            WHERE timestamp <= 0 AND timestamp_valid != 0
+            """
+        )
         conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_device_status_exact_event
@@ -984,13 +1006,13 @@ def _fetch_raw_data(hours: float, bms_id: Optional[str] = None) -> List[Dict]:
         if bms_id:
             cursor.execute("""
                 SELECT * FROM bms_telemetry
-                WHERE timestamp >= ? AND bms_id = ?
+                WHERE timestamp_valid = 1 AND timestamp >= ? AND bms_id = ?
                 ORDER BY timestamp ASC
             """, (cutoff_time, bms_id))
         else:
             cursor.execute("""
                 SELECT * FROM bms_telemetry
-                WHERE timestamp >= ?
+                WHERE timestamp_valid = 1 AND timestamp >= ?
                 ORDER BY timestamp ASC
             """, (cutoff_time,))
 
@@ -1011,14 +1033,14 @@ def _fetch_dashboard_raw_data(hours: float, bms_id: Optional[str] = None) -> Lis
             cursor.execute(f"""
                 SELECT {DASHBOARD_VIEW_COLUMN_SQL}
                 FROM bms_telemetry
-                WHERE timestamp >= ? AND bms_id = ?
+                WHERE timestamp_valid = 1 AND timestamp >= ? AND bms_id = ?
                 ORDER BY timestamp ASC
             """, (cutoff_time, bms_id))
         else:
             cursor.execute(f"""
                 SELECT {DASHBOARD_VIEW_COLUMN_SQL}
                 FROM bms_telemetry
-                WHERE timestamp >= ?
+                WHERE timestamp_valid = 1 AND timestamp >= ?
                 ORDER BY timestamp ASC
             """, (cutoff_time,))
 
@@ -1053,7 +1075,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
-                WHERE timestamp >= ? AND bms_id = ?
+                WHERE timestamp_valid = 1 AND timestamp >= ? AND bms_id = ?
                 GROUP BY CAST((timestamp / ?) AS INTEGER)
                 ORDER BY timestamp ASC
             """, (bucket_seconds, bucket_seconds, cutoff_time, bms_id, bucket_seconds))
@@ -1075,7 +1097,7 @@ def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[s
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
-                WHERE timestamp >= ?
+                WHERE timestamp_valid = 1 AND timestamp >= ?
                 GROUP BY CAST((timestamp / ?) AS INTEGER)
                 ORDER BY timestamp ASC
             """, (bucket_seconds, bucket_seconds, cutoff_time, bucket_seconds))
@@ -1114,7 +1136,8 @@ def get_telemetry_data_for_view(
         'point_count': len(data),
         'source_record_count': source_record_count,
         'hours': hours,
-        'bms_id': bms_id
+        'bms_id': bms_id,
+        'unanchored_record_count': get_unanchored_telemetry_count(bms_id),
     }
     return data, metadata
 
@@ -1138,13 +1161,13 @@ def get_latest_point_for_view(
             cursor.execute("""
                 SELECT MAX(timestamp) AS latest_timestamp
                 FROM bms_telemetry
-                WHERE timestamp >= ? AND bms_id = ?
+                WHERE timestamp_valid = 1 AND timestamp >= ? AND bms_id = ?
             """, (cutoff_time, bms_id))
         else:
             cursor.execute("""
                 SELECT MAX(timestamp) AS latest_timestamp
                 FROM bms_telemetry
-                WHERE timestamp >= ?
+                WHERE timestamp_valid = 1 AND timestamp >= ?
             """, (cutoff_time,))
 
         latest_row = cursor.fetchone()
@@ -1172,7 +1195,8 @@ def get_latest_point_for_view(
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
-                WHERE timestamp >= ? AND timestamp < ? AND bms_id = ?
+                WHERE timestamp_valid = 1
+                  AND timestamp >= ? AND timestamp < ? AND bms_id = ?
             """, (bucket_start, bucket_start, bucket_end, bms_id))
         else:
             cursor.execute("""
@@ -1191,7 +1215,8 @@ def get_latest_point_for_view(
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3
                 FROM bms_telemetry
-                WHERE timestamp >= ? AND timestamp < ?
+                WHERE timestamp_valid = 1
+                  AND timestamp >= ? AND timestamp < ?
             """, (bucket_start, bucket_start, bucket_end))
 
         aggregated_row = cursor.fetchone()
@@ -1224,13 +1249,13 @@ def get_latest_reading(bms_id: Optional[str] = None) -> Optional[Dict]:
             cursor.execute("""
                 SELECT * FROM bms_telemetry 
                 WHERE bms_id = ?
-                ORDER BY timestamp DESC 
+                ORDER BY timestamp_valid DESC, timestamp DESC, id DESC
                 LIMIT 1
             """, (bms_id,))
         else:
             cursor.execute("""
                 SELECT * FROM bms_telemetry 
-                ORDER BY timestamp DESC 
+                ORDER BY timestamp_valid DESC, timestamp DESC, id DESC
                 LIMIT 1
             """)
         row = cursor.fetchone()
@@ -1248,15 +1273,44 @@ def get_latest_timestamp(bms_id: Optional[str] = None) -> Optional[int]:
             cursor.execute("""
                 SELECT MAX(timestamp) AS latest_timestamp
                 FROM bms_telemetry
-                WHERE bms_id = ?
+                WHERE timestamp_valid = 1 AND bms_id = ?
             """, (bms_id,))
         else:
             cursor.execute("""
                 SELECT MAX(timestamp) AS latest_timestamp
                 FROM bms_telemetry
+                WHERE timestamp_valid = 1
             """)
         row = cursor.fetchone()
         return row['latest_timestamp'] if row else None
+    finally:
+        conn.close()
+
+
+def get_unanchored_telemetry_count(bms_id: Optional[str] = None) -> int:
+    """Count preserved samples whose capture time was not synchronized."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        if bms_id:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM bms_telemetry
+                WHERE timestamp_valid = 0 AND bms_id = ?
+                """,
+                (bms_id,)
+            )
+        else:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM bms_telemetry
+                WHERE timestamp_valid = 0
+                """
+            )
+        row = cursor.fetchone()
+        return int(row['count']) if row else 0
     finally:
         conn.close()
 
@@ -1285,7 +1339,7 @@ def get_latest_dashboard_point(bms_id: Optional[str] = None) -> Optional[Dict]:
             cursor.execute(f"""
                 SELECT {DASHBOARD_VIEW_COLUMN_SQL}
                 FROM bms_telemetry
-                WHERE bms_id = ?
+                WHERE timestamp_valid = 1 AND bms_id = ?
                 ORDER BY timestamp DESC
                 LIMIT 1
             """, (bms_id,))
@@ -1293,6 +1347,7 @@ def get_latest_dashboard_point(bms_id: Optional[str] = None) -> Optional[Dict]:
             cursor.execute(f"""
                 SELECT {DASHBOARD_VIEW_COLUMN_SQL}
                 FROM bms_telemetry
+                WHERE timestamp_valid = 1
                 ORDER BY timestamp DESC
                 LIMIT 1
             """)
@@ -1484,7 +1539,7 @@ def get_recent_data_for_websocket(limit: int = 50, bms_id: Optional[str] = None)
                        power_w, min_temp_c, max_temp_c, cells_v_1, cells_v_2, 
                        cells_v_3, cells_v_4
                 FROM bms_telemetry 
-                WHERE bms_id = ?
+                WHERE timestamp_valid = 1 AND bms_id = ?
                 ORDER BY timestamp DESC 
                 LIMIT ?
             """, (bms_id, limit))
@@ -1494,6 +1549,7 @@ def get_recent_data_for_websocket(limit: int = 50, bms_id: Optional[str] = None)
                        power_w, min_temp_c, max_temp_c, cells_v_1, cells_v_2, 
                        cells_v_3, cells_v_4
                 FROM bms_telemetry 
+                WHERE timestamp_valid = 1
                 ORDER BY timestamp DESC 
                 LIMIT ?
             """, (limit,))

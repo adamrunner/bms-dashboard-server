@@ -240,6 +240,10 @@ function updateResolutionAndPointInfo(meta = {}) {
     } else {
         pointInfo.textContent = `Points: ${meta.point_count || 0}`;
     }
+    if (meta.unanchored_record_count) {
+        pointInfo.textContent +=
+            ` · ${meta.unanchored_record_count} samples preserved without capture time (not charted)`;
+    }
 }
 
 function setFetchStatus(message, level = 'warning', autoHideMs = 5000) {

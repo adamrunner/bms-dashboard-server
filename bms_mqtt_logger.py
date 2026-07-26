@@ -94,7 +94,8 @@ MQTT_AVAILABILITY_TOPIC = os.getenv(
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
 
 INSERT_COLUMNS = ', '.join(EXPECTED_COLUMNS)
-INSERT_PLACEHOLDERS = ', '.join(['?' for _ in EXPECTED_COLUMNS])
+INSERT_COLUMNS = f"{INSERT_COLUMNS}, timestamp_valid"
+INSERT_PLACEHOLDERS = ', '.join(['?' for _ in range(len(EXPECTED_COLUMNS) + 1)])
 INSERT_SQL = f"INSERT INTO bms_telemetry ({INSERT_COLUMNS}) VALUES ({INSERT_PLACEHOLDERS})"
 
 STATUS_REQUIRED_STRING_FIELDS = {
@@ -230,10 +231,15 @@ def insert_telemetry_data(csv_data):
                 logger.warning(f"Rejected telemetry row: {exc}")
                 continue
 
-            rows_to_insert.append([
+            converted_row = [
                 convert_value(value, EXPECTED_COLUMNS[i])
                 for i, value in enumerate(normalized_row)
-            ])
+            ]
+            capture_timestamp = converted_row[1]
+            converted_row.append(
+                capture_timestamp is not None and capture_timestamp > 0
+            )
+            rows_to_insert.append(converted_row)
 
         if not rows_to_insert:
             logger.warning("No valid telemetry rows found in MQTT payload")

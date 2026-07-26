@@ -86,6 +86,14 @@ Retained MQTT session state on `bms/availability/<device_id>` is persisted as
 deduplicated transitions. The dashboard labels it explicitly as MQTT
 availability; it does not infer vehicle power from the broker session.
 
+Telemetry captured before the gateway has synchronized its wall clock is
+preserved with the original `timestamp=0` sentinel and
+`timestamp_valid=false`. These unanchored samples remain available for audit
+and diagnostics, but time-range queries and charts exclude them and report
+their count separately. The same rule applies to a live MQTT row and to a row
+replayed from the SD spool: the current CSV payload has no trustworthy replay
+marker, and broker receipt time must not be substituted for capture time.
+
 When `APP_ENV=development`, the Python services will log a warning and use development-only fallback values if `FLASK_SECRET_KEY` or MQTT credentials are omitted. In any other environment, those variables must be set explicitly or the services will fail to start.
 
 ### Using External MQTT Broker

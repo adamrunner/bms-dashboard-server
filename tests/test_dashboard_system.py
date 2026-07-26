@@ -157,6 +157,68 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(latest["temps_c_1"], 22.0)
         self.assertEqual(latest["temps_c_2"], 25.3)
         self.assertIsNone(latest["temps_c_3"])
+        self.assertTrue(latest["timestamp_valid"])
+
+    def test_live_presync_payload_is_preserved_but_not_charted(self):
+        payload = build_gateway_simulator_payload("gw-presync-live", 0)
+
+        bms_mqtt_logger.insert_telemetry_data(payload)
+
+        conn = database_queries.create_db_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT timestamp, timestamp_valid, pack_voltage_v
+                FROM bms_telemetry
+                WHERE bms_id = ?
+                """,
+                ("gw-presync-live",)
+            ).fetchone()
+        finally:
+            conn.close()
+        records, meta = database_queries.get_telemetry_data_for_view(
+            1, "gw-presync-live", "auto", 300
+        )
+
+        self.assertEqual(row["timestamp"], 0)
+        self.assertFalse(row["timestamp_valid"])
+        self.assertEqual(row["pack_voltage_v"], 13.2)
+        self.assertEqual(records, [])
+        self.assertEqual(meta["unanchored_record_count"], 1)
+
+    def test_replay_payload_applies_timestamp_policy_per_row(self):
+        synchronized_at = int(time.time())
+        replay_payload = "\n".join([
+            build_gateway_simulator_payload("gw-replay", 0),
+            build_gateway_simulator_payload("gw-replay", synchronized_at),
+        ])
+
+        bms_mqtt_logger.insert_telemetry_data(replay_payload)
+
+        conn = database_queries.create_db_connection()
+        try:
+            rows = conn.execute(
+                """
+                SELECT timestamp, timestamp_valid
+                FROM bms_telemetry
+                WHERE bms_id = ?
+                ORDER BY id
+                """,
+                ("gw-replay",)
+            ).fetchall()
+        finally:
+            conn.close()
+        records, meta = database_queries.get_telemetry_data_for_view(
+            0.017, "gw-replay", "auto", 300
+        )
+
+        self.assertEqual(
+            [(row["timestamp"], bool(row["timestamp_valid"])) for row in rows],
+            [(0, False), (synchronized_at, True)]
+        )
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["timestamp"], synchronized_at)
+        self.assertEqual(meta["unanchored_record_count"], 1)
 
     def test_variable_width_row_rejects_count_mismatch(self):
         now = int(time.time())
