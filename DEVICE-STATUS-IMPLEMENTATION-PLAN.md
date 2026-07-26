@@ -210,7 +210,8 @@ rules have produced useful, low-noise results in production.
 Implementation status (2026-07-25): schema-v2 event identity, device time,
 backward-compatible SQLite migration, exact backend deduplication, API clock
 skew, compatibility tests, and explicit persisted rollback evidence are
-implemented locally. Production deployment remains pending.
+implemented. The backend migration and APIs were deployed to Anton on
+2026-07-25; schema-v2 firmware flashing and canary validation remain pending.
 
 ### Firmware
 
@@ -254,8 +255,8 @@ implemented locally. Production deployment remains pending.
 Implementation status (2026-07-25): firmware last will and graceful offline
 publication, broker ACL/configuration, transition persistence, latest-state
 API and Socket.IO updates, and the selected-device availability badge are
-implemented locally. Anton deployment and forced-link canary validation remain
-pending.
+implemented. Backend ingestion and persistence were deployed to Anton on
+2026-07-25; firmware canary and forced-link validation remain pending.
 
 ### Firmware and broker
 
@@ -295,7 +296,7 @@ pending.
 Implementation status (2026-07-25): bounded ID-based status pagination, the
 single-query fleet read model, firmware distribution summary, client-side
 device/version/availability filters, dashboard navigation, and the dedicated
-status page are implemented locally. Production deployment remains pending.
+status page were deployed to Anton on 2026-07-25.
 
 Add APIs with bounded pagination:
 
@@ -334,8 +335,9 @@ bounded; it must not load each device's complete history to render one page.
 Implementation status (2026-07-25): explicit firmware rollback evidence,
 firmware expectation policy with fleet and device scopes, transactional alert
 evaluation, persistent acknowledgement/resolution, REST APIs, fleet-page
-controls, and lifecycle tests are implemented locally. Production deployment
-and real rollback/watchdog canary validation remain pending.
+controls, and lifecycle tests were deployed to Anton in dashboard-only mode on
+2026-07-25. Firmware rollout and real rollback/watchdog canary validation
+remain pending.
 
 Add a `device_alerts` table containing alert type, severity, device ID,
 source status row, a unique deduplication key, structured details, detection
