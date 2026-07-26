@@ -2,7 +2,9 @@
 # device pattern below, keeping this account read-only.
 user bms-logger
 topic deny write bms/telemetry/bms-logger
+topic deny write bms/status/bms-logger
 topic read bms/telemetry/+
+topic read bms/status/+
 topic read $SYS/broker/uptime
 
 # Legacy account retained temporarily for esp32-bms-monitor migration.
@@ -13,5 +15,7 @@ topic readwrite #
 topic read $SYS/broker/uptime
 
 # Device usernames must equal the final topic segment (their device_id).
-# Example: username gw-a1b2c3 may publish only bms/telemetry/gw-a1b2c3.
+# Example: username gw-a1b2c3 may publish only its telemetry and retained
+# boot/OTA status records.
 pattern write bms/telemetry/%u
+pattern write bms/status/%u

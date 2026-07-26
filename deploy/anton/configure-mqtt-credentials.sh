@@ -206,6 +206,9 @@ provision() {
     grep -q '^pattern write bms/telemetry/%u$' \
         "${app_dir}/mosquitto/config/acl" ||
         fail "deployed ACL does not contain the device topic policy"
+    grep -q '^pattern write bms/status/%u$' \
+        "${app_dir}/mosquitto/config/acl" ||
+        fail "deployed ACL does not contain the device status topic policy"
 
     create_backup
     trap on_error ERR
