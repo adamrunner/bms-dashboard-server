@@ -222,6 +222,11 @@ class DashboardSystemTestCase(unittest.TestCase):
         )
         database_queries.validate_database_schema()
 
+    def test_dashboard_image_contains_schema_migration_source(self):
+        dockerfile = Path("Dockerfile.dashboard").read_text(encoding="utf-8")
+
+        self.assertIn("COPY bms_schema.sql .", dockerfile)
+
     def test_status_v2_migration_upgrades_existing_table(self):
         legacy_path = str(Path(self.temp_dir.name) / "legacy_status.db")
         conn = sqlite3.connect(legacy_path)
