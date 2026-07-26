@@ -138,6 +138,60 @@
             </div>
         </div>
 
+        <!-- Device boot and OTA status -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card device-status-card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">Device Status</h5>
+                        <span id="deviceVerificationBadge" class="badge text-bg-secondary">
+                            No status received
+                        </span>
+                    </div>
+                    <div class="card-body">
+                        <div class="device-status-grid">
+                            <div>
+                                <div class="device-status-label">Firmware</div>
+                                <div class="device-status-value" id="deviceFirmwareVersion">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">OTA Slot</div>
+                                <div class="device-status-value" id="deviceOtaSlot">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Last Status Check-in</div>
+                                <div class="device-status-value" id="deviceStatusReceived">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Reset Reason</div>
+                                <div class="device-status-value" id="deviceResetReason">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Boot ID</div>
+                                <div class="device-status-value device-status-monospace" id="deviceBootId">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">ESP-IDF</div>
+                                <div class="device-status-value" id="deviceIdfVersion">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Firmware Built</div>
+                                <div class="device-status-value" id="deviceBuildTime">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Record Source</div>
+                                <div class="device-status-value" id="deviceStatusSource">--</div>
+                            </div>
+                        </div>
+                        <div class="small text-muted mt-3">
+                            Status is published at boot, MQTT reconnect, and OTA verification.
+                            Current reporting health is reflected by telemetry recency.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Charts -->
         <div class="row">
             <!-- Pack Voltage -->

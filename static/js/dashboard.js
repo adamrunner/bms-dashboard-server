@@ -10,6 +10,8 @@ let activeDataRequestController = null;
 let latestDataRequestId = 0;
 let fetchStatusTimer = null;
 let bmsSelectionReady = false;
+let latestDeviceStatus = null;
+let deviceStatusAgeTimer = null;
 
 const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m', '10m', '15m', '30m'];
 const CHART_DATA_FIELDS = {
@@ -118,6 +120,12 @@ document.addEventListener('DOMContentLoaded', function() {
     if (document.getElementById('autoRefresh').checked) {
         connectWebSocket();
     }
+
+    deviceStatusAgeTimer = setInterval(() => {
+        if (latestDeviceStatus) {
+            updateDeviceStatusReceivedTime(latestDeviceStatus);
+        }
+    }, 30000);
 });
 
 function applyInitialStateFromUrl() {
@@ -541,6 +549,12 @@ function connectWebSocket() {
         updateStatistics(stats);
     });
 
+    socket.on('device_status_update', function(status) {
+        if (status?.device_id === currentBmsId) {
+            renderDeviceStatus(status);
+        }
+    });
+
     socket.on('connect_error', function(error) {
         console.error('WebSocket connection error:', error);
     });
@@ -590,6 +604,7 @@ function loadBmsIds() {
 
 function refreshDashboardData(sourceModule = 'time') {
     updateUrlState();
+    loadDeviceStatus();
     if (document.getElementById('autoRefresh').checked && socket && socket.connected) {
         setLoadingState(true, 'Loading telemetry data...', sourceModule);
         sendViewSubscription();
@@ -641,6 +656,121 @@ function loadInitialData(sourceModule = 'time') {
         });
 
     loadStatistics();
+}
+
+function formatAge(seconds) {
+    const age = Math.max(0, Math.floor(Number(seconds) || 0));
+    if (age < 60) {
+        return `${age}s ago`;
+    }
+    if (age < 3600) {
+        return `${Math.floor(age / 60)}m ago`;
+    }
+    if (age < 86400) {
+        return `${Math.floor(age / 3600)}h ago`;
+    }
+    return `${Math.floor(age / 86400)}d ago`;
+}
+
+function updateDeviceStatusReceivedTime(status) {
+    const receivedElement = document.getElementById('deviceStatusReceived');
+    if (!status?.received_at) {
+        receivedElement.textContent = '--';
+        return;
+    }
+
+    const receivedAt = new Date(status.received_at * 1000);
+    const ageSeconds = Math.max(0, Math.floor((Date.now() - receivedAt.getTime()) / 1000));
+    receivedElement.textContent = `${receivedAt.toLocaleString()} (${formatAge(ageSeconds)})`;
+}
+
+function abbreviateBootId(bootId) {
+    if (!bootId || bootId.length <= 14) {
+        return bootId || '--';
+    }
+    return `${bootId.slice(0, 8)}…${bootId.slice(-4)}`;
+}
+
+function formatResetReason(reason) {
+    if (!reason) {
+        return '--';
+    }
+    return reason
+        .split('_')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+        .join(' ');
+}
+
+function renderDeviceStatus(status) {
+    latestDeviceStatus = status && status.device_id ? status : null;
+
+    const badge = document.getElementById('deviceVerificationBadge');
+    if (!latestDeviceStatus) {
+        badge.textContent = 'No status received';
+        badge.className = 'badge text-bg-secondary';
+        document.getElementById('deviceFirmwareVersion').textContent = '--';
+        document.getElementById('deviceOtaSlot').textContent = '--';
+        document.getElementById('deviceStatusReceived').textContent = '--';
+        document.getElementById('deviceResetReason').textContent = '--';
+        document.getElementById('deviceBootId').textContent = '--';
+        document.getElementById('deviceBootId').title = '';
+        document.getElementById('deviceIdfVersion').textContent = '--';
+        document.getElementById('deviceBuildTime').textContent = '--';
+        document.getElementById('deviceStatusSource').textContent = '--';
+        return;
+    }
+
+    badge.textContent = latestDeviceStatus.pending_verify
+        ? 'Pending OTA verification'
+        : 'OTA verified';
+    badge.className = latestDeviceStatus.pending_verify
+        ? 'badge text-bg-warning'
+        : 'badge text-bg-success';
+
+    document.getElementById('deviceFirmwareVersion').textContent =
+        latestDeviceStatus.firmware_version || '--';
+    document.getElementById('deviceOtaSlot').textContent =
+        latestDeviceStatus.ota_slot || '--';
+    updateDeviceStatusReceivedTime(latestDeviceStatus);
+    document.getElementById('deviceResetReason').textContent =
+        formatResetReason(latestDeviceStatus.reset_reason);
+
+    const bootElement = document.getElementById('deviceBootId');
+    bootElement.textContent = abbreviateBootId(latestDeviceStatus.boot_id);
+    bootElement.title = latestDeviceStatus.boot_id || '';
+
+    document.getElementById('deviceIdfVersion').textContent =
+        latestDeviceStatus.idf_version || '--';
+    document.getElementById('deviceBuildTime').textContent =
+        [latestDeviceStatus.build_date, latestDeviceStatus.build_time]
+            .filter(Boolean)
+            .join(' ') || '--';
+    document.getElementById('deviceStatusSource').textContent =
+        latestDeviceStatus.mqtt_retained ? 'Retained snapshot' : 'Live check-in';
+}
+
+function loadDeviceStatus() {
+    if (!currentBmsId) {
+        renderDeviceStatus(null);
+        return;
+    }
+
+    const url = '/api/device-status/latest?bms_id=' + encodeURIComponent(currentBmsId);
+    fetchJsonWithTimeout(url, {}, 8000)
+        .then(status => {
+            if (!status.device_id || status.device_id === currentBmsId) {
+                renderDeviceStatus(status);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading device status:', error);
+            setFetchStatus(
+                error.name === 'AbortError'
+                    ? 'Device status fetch timed out'
+                    : 'Device status fetch failed',
+                error.name === 'AbortError' ? 'warning' : 'error'
+            );
+        });
 }
 
 function clearChartData() {

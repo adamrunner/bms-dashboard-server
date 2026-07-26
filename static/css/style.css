@@ -35,6 +35,34 @@
     font-size: 0.9em;
 }
 
+.device-status-card {
+    border-left: 0.3rem solid #0d6efd;
+}
+
+.device-status-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 1rem 1.5rem;
+}
+
+.device-status-label {
+    color: #6c757d;
+    font-size: 0.78rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+}
+
+.device-status-value {
+    color: #2c3e50;
+    font-size: 1rem;
+    overflow-wrap: anywhere;
+}
+
+.device-status-monospace {
+    font-family: var(--bs-font-monospace);
+}
+
 #lastUpdate {
     margin-right: var(--last-update-margin);
 }
