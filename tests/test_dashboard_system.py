@@ -64,6 +64,20 @@ def build_status_payload(
     return json.dumps(payload)
 
 
+def build_availability_payload(
+    device_id: str,
+    *,
+    online: bool = True,
+    boot_id: str = "0123456789abcdef"
+) -> str:
+    return json.dumps({
+        "schema_version": 1,
+        "device_id": device_id,
+        "online": online,
+        "boot_id": boot_id
+    })
+
+
 class DashboardSystemTestCase(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -81,6 +95,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         dashboard_server.monitoring_active = False
         dashboard_server.last_seen_record_id = None
         dashboard_server.last_seen_status_id = None
+        dashboard_server.last_seen_availability_id = None
 
     def tearDown(self):
         database_queries.DATABASE_PATH = self.original_database_path
@@ -90,6 +105,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         dashboard_server.monitoring_active = False
         dashboard_server.last_seen_record_id = None
         dashboard_server.last_seen_status_id = None
+        dashboard_server.last_seen_availability_id = None
         self.temp_dir.cleanup()
 
     def count_status_rows(self, device_id: str) -> int:
@@ -97,6 +113,21 @@ class DashboardSystemTestCase(unittest.TestCase):
         try:
             row = conn.execute(
                 "SELECT COUNT(*) AS count FROM device_status_checkins WHERE device_id = ?",
+                (device_id,)
+            ).fetchone()
+            return row["count"]
+        finally:
+            conn.close()
+
+    def count_availability_rows(self, device_id: str) -> int:
+        conn = database_queries.create_db_connection()
+        try:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM device_availability_events
+                WHERE device_id = ?
+                """,
                 (device_id,)
             ).fetchone()
             return row["count"]
@@ -163,6 +194,12 @@ class DashboardSystemTestCase(unittest.TestCase):
                 WHERE type = 'index' AND name = 'idx_device_status_exact_event'
                 """
             ).fetchone()
+            availability_table = conn.execute(
+                """
+                SELECT name FROM sqlite_master
+                WHERE type = 'table' AND name = 'device_availability_events'
+                """
+            ).fetchone()
         finally:
             conn.close()
 
@@ -176,6 +213,10 @@ class DashboardSystemTestCase(unittest.TestCase):
             "rollback_target_version"
         }.issubset(columns))
         self.assertEqual(exact_index["name"], "idx_device_status_exact_event")
+        self.assertEqual(
+            availability_table["name"],
+            "device_availability_events"
+        )
         database_queries.validate_database_schema()
 
     def test_status_v2_migration_upgrades_existing_table(self):
@@ -237,7 +278,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertFalse(latest["mqtt_retained"])
         self.assertTrue(latest["reported_online"])
 
-    def test_mqtt_connect_subscribes_to_telemetry_and_status(self):
+    def test_mqtt_connect_subscribes_to_telemetry_status_and_availability(self):
         client = mock.Mock()
         client.subscribe.return_value = (0, 42)
 
@@ -245,7 +286,8 @@ class DashboardSystemTestCase(unittest.TestCase):
 
         client.subscribe.assert_called_once_with([
             (bms_mqtt_logger.MQTT_TOPIC, 0),
-            (bms_mqtt_logger.MQTT_STATUS_TOPIC, 1)
+            (bms_mqtt_logger.MQTT_STATUS_TOPIC, 1),
+            (bms_mqtt_logger.MQTT_AVAILABILITY_TOPIC, 1),
         ])
 
     def test_status_validation_rejects_bad_payloads(self):
@@ -355,6 +397,87 @@ class DashboardSystemTestCase(unittest.TestCase):
                 json.dumps(payload),
                 "bms/status/gw-v2-time"
             )
+
+    def test_availability_validation_rejects_invalid_documents(self):
+        with self.assertRaisesRegex(ValueError, "invalid JSON"):
+            bms_mqtt_logger.normalize_availability_payload(
+                "{",
+                "bms/availability/gw-invalid"
+            )
+
+        missing_online = json.loads(build_availability_payload("gw-missing"))
+        del missing_online["online"]
+        with self.assertRaisesRegex(ValueError, "online must be a boolean"):
+            bms_mqtt_logger.normalize_availability_payload(
+                json.dumps(missing_online),
+                "bms/availability/gw-missing"
+            )
+
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            bms_mqtt_logger.normalize_availability_payload(
+                build_availability_payload("gw-payload"),
+                "bms/availability/gw-topic"
+            )
+
+    def test_availability_replay_is_suppressed_but_transitions_remain(self):
+        topic = "bms/availability/gw-availability"
+        online = build_availability_payload("gw-availability", online=True)
+        offline = build_availability_payload("gw-availability", online=False)
+
+        first_online_id = bms_mqtt_logger.insert_availability_data(
+            online,
+            topic,
+            mqtt_retained=True
+        )
+        replay_id = bms_mqtt_logger.insert_availability_data(
+            online,
+            topic,
+            mqtt_retained=True
+        )
+        offline_id = bms_mqtt_logger.insert_availability_data(
+            offline,
+            topic,
+            mqtt_retained=True
+        )
+        repeated_offline_id = bms_mqtt_logger.insert_availability_data(
+            offline,
+            topic,
+            mqtt_retained=False
+        )
+        reconnected_id = bms_mqtt_logger.insert_availability_data(
+            online,
+            topic,
+            mqtt_retained=False
+        )
+
+        self.assertIsNotNone(first_online_id)
+        self.assertIsNone(replay_id)
+        self.assertIsNotNone(offline_id)
+        self.assertIsNone(repeated_offline_id)
+        self.assertIsNotNone(reconnected_id)
+        self.assertEqual(self.count_availability_rows("gw-availability"), 3)
+        latest = database_queries.get_latest_device_availability(
+            "gw-availability"
+        )
+        self.assertTrue(latest["online"])
+        self.assertFalse(latest["mqtt_retained"])
+
+    def test_new_boot_is_an_availability_event_even_if_state_matches(self):
+        topic = "bms/availability/gw-new-boot"
+        first = build_availability_payload(
+            "gw-new-boot",
+            boot_id="boot-one"
+        )
+        second = build_availability_payload(
+            "gw-new-boot",
+            boot_id="boot-two"
+        )
+
+        first_id = bms_mqtt_logger.insert_availability_data(first, topic, True)
+        second_id = bms_mqtt_logger.insert_availability_data(second, topic, True)
+
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(self.count_availability_rows("gw-new-boot"), 2)
 
     def test_secret_and_mqtt_config_use_development_fallbacks(self):
         with mock.patch.dict('os.environ', {'APP_ENV': 'development'}, clear=False):
@@ -481,6 +604,43 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(missing_id_response.status_code, 400)
         self.assertEqual(unknown_response.get_json(), {})
         self.assertIn("gw-status-only", database_queries.get_available_bms_ids())
+
+    def test_latest_device_availability_api_and_device_id_union(self):
+        bms_mqtt_logger.insert_availability_data(
+            build_availability_payload("gw-availability-only", online=False),
+            "bms/availability/gw-availability-only",
+            mqtt_retained=True
+        )
+
+        client = dashboard_server.app.test_client()
+        response = client.get(
+            "/api/device-availability/latest?bms_id=gw-availability-only"
+        )
+        missing_id_response = client.get("/api/device-availability/latest")
+        unknown_response = client.get(
+            "/api/device-availability/latest?bms_id=gw-unknown"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        availability = response.get_json()
+        self.assertFalse(availability["online"])
+        self.assertTrue(availability["mqtt_retained"])
+        self.assertIn("received_age_seconds", availability)
+        self.assertEqual(missing_id_response.status_code, 400)
+        self.assertEqual(unknown_response.get_json(), {})
+        self.assertIn(
+            "gw-availability-only",
+            database_queries.get_available_bms_ids()
+        )
+
+    def test_dashboard_contains_mqtt_availability_badge(self):
+        response = dashboard_server.app.test_client().get("/")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn(
+            'id="deviceAvailabilityBadge"',
+            response.get_data(as_text=True)
+        )
 
     def test_auto_view_aggregates_thirty_minute_range(self):
         now = int(time.time())
@@ -610,6 +770,67 @@ class DashboardSystemTestCase(unittest.TestCase):
         status = status_messages[0]["args"][0]
         self.assertEqual(status["device_id"], "gw-socket-status")
         self.assertEqual(status["firmware_version"], "9217453")
+
+    def test_background_monitor_emits_selected_device_availability(self):
+        now = int(time.time())
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-socket-availability", now)
+        )
+
+        with mock.patch.object(
+            dashboard_server.socketio,
+            "start_background_task",
+            return_value=None
+        ):
+            client = dashboard_server.socketio.test_client(dashboard_server.app)
+            client.get_received()
+            client.emit(
+                "set_view",
+                {
+                    "hours": 1,
+                    "bms_id": "gw-socket-availability",
+                    "resolution": "auto",
+                    "target_points": 300
+                }
+            )
+            client.get_received()
+
+        bms_mqtt_logger.insert_availability_data(
+            build_availability_payload("gw-socket-availability"),
+            "bms/availability/gw-socket-availability",
+            mqtt_retained=False
+        )
+        dashboard_server.last_seen_record_id = database_queries.get_latest_record_id()
+        dashboard_server.last_seen_status_id = (
+            database_queries.get_latest_status_record_id()
+        )
+        dashboard_server.last_seen_availability_id = None
+        dashboard_server.monitoring_active = True
+
+        def stop_monitor(_seconds):
+            dashboard_server.monitoring_active = False
+
+        with mock.patch.object(
+            dashboard_server.socketio,
+            "sleep",
+            side_effect=stop_monitor
+        ):
+            dashboard_server.background_monitor()
+
+        received = client.get_received()
+        client.disconnect()
+        availability_messages = [
+            message for message in received
+            if message["name"] == "device_availability_update"
+        ]
+
+        self.assertEqual(len(availability_messages), 1)
+        availability = availability_messages[0]["args"][0]
+        self.assertEqual(
+            availability["device_id"],
+            "gw-socket-availability"
+        )
+        self.assertTrue(availability["online"])
 
 
 if __name__ == "__main__":

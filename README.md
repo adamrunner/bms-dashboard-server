@@ -67,6 +67,7 @@ MQTT_USERNAME=admin            # required outside development
 MQTT_PASSWORD=password1234     # required outside development
 MQTT_TOPIC=bms/telemetry/+     # subscribe to bms/telemetry/<bms-id>
 MQTT_STATUS_TOPIC=bms/status/+ # retained boot/OTA status
+MQTT_AVAILABILITY_TOPIC=bms/availability/+ # retained MQTT session state
 
 # Dashboard secret
 FLASK_SECRET_KEY=change-me     # required outside development
@@ -95,6 +96,12 @@ Schema v2 adds boot-scoped `status_seq`, device `reported_at`, time source, and
 status reason fields. Its `(device_id, boot_id, status_seq)` identity is
 deduplicated exactly; retained schema-v1 replays continue to use the legacy
 payload heuristic.
+
+MQTT broker-session availability is published separately as retained JSON on
+`bms/availability/<device_id>`. The logger stores actual online/offline
+transitions in `device_availability_events`, suppresses retained replays of an
+unchanged state, and displays the latest transition separately from browser
+Socket.IO connectivity and telemetry freshness.
 
 The normalized database column order is:
 

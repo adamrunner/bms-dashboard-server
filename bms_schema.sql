@@ -69,3 +69,19 @@ CREATE INDEX IF NOT EXISTS idx_device_status_device_boot
     ON device_status_checkins(device_id, boot_id);
 CREATE INDEX IF NOT EXISTS idx_device_status_received
     ON device_status_checkins(received_at);
+
+CREATE TABLE IF NOT EXISTS device_availability_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    boot_id TEXT NOT NULL,
+    online BOOLEAN NOT NULL,
+    mqtt_retained BOOLEAN NOT NULL DEFAULT 0,
+    payload_sha256 TEXT NOT NULL,
+    raw_payload TEXT NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_device_availability_device_received
+    ON device_availability_events(device_id, received_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_device_availability_received
+    ON device_availability_events(received_at);

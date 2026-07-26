@@ -64,6 +64,15 @@ DEVICE_STATUS_VIEW_COLUMNS = [
     'received_at'
 ]
 DEVICE_STATUS_VIEW_COLUMN_SQL = ', '.join(DEVICE_STATUS_VIEW_COLUMNS)
+DEVICE_AVAILABILITY_VIEW_COLUMNS = [
+    'id',
+    'device_id',
+    'boot_id',
+    'online',
+    'mqtt_retained',
+    'received_at',
+]
+DEVICE_AVAILABILITY_VIEW_COLUMN_SQL = ', '.join(DEVICE_AVAILABILITY_VIEW_COLUMNS)
 DEVICE_STATUS_V2_COLUMNS = {
     'status_seq': 'INTEGER',
     'reported_at': 'INTEGER',
@@ -126,11 +135,20 @@ def validate_database_schema() -> None:
             SELECT name
             FROM sqlite_master
             WHERE type = 'table'
-              AND name IN ('bms_telemetry', 'device_status_checkins')
+              AND name IN (
+                  'bms_telemetry',
+                  'device_status_checkins',
+                  'device_availability_events'
+              )
             """
         )
         found_tables = {row[0] for row in cursor.fetchall()}
-        missing_tables = {'bms_telemetry', 'device_status_checkins'} - found_tables
+        expected_tables = {
+            'bms_telemetry',
+            'device_status_checkins',
+            'device_availability_events',
+        }
+        missing_tables = expected_tables - found_tables
         if missing_tables:
             raise RuntimeError(
                 f"missing database tables {sorted(missing_tables)} in: {DATABASE_PATH}"
@@ -252,6 +270,97 @@ def get_latest_status_record_id() -> Optional[int]:
     try:
         cursor = conn.cursor()
         cursor.execute("SELECT MAX(id) AS latest_id FROM device_status_checkins")
+        row = cursor.fetchone()
+        return row['latest_id'] if row else None
+    finally:
+        conn.close()
+
+
+def insert_device_availability_event(availability: Dict) -> Optional[int]:
+    """Insert a real availability transition, suppressing repeated state."""
+    conn = create_db_connection(use_row_factory=False)
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT boot_id, online
+            FROM device_availability_events
+            WHERE device_id = ?
+            ORDER BY received_at DESC, id DESC
+            LIMIT 1
+            """,
+            (availability['device_id'],)
+        )
+        latest = cursor.fetchone()
+        if (
+            latest
+            and latest[0] == availability['boot_id']
+            and bool(latest[1]) == availability['online']
+        ):
+            return None
+
+        cursor.execute(
+            """
+            INSERT INTO device_availability_events (
+                device_id, boot_id, online, mqtt_retained,
+                payload_sha256, raw_payload, received_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                availability['device_id'],
+                availability['boot_id'],
+                availability['online'],
+                availability['mqtt_retained'],
+                availability['payload_sha256'],
+                availability['raw_payload'],
+                availability['received_at'],
+            )
+        )
+        row_id = cursor.lastrowid
+        conn.commit()
+        return row_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def _normalize_availability_row(row: sqlite3.Row) -> Dict:
+    """Convert SQLite integer booleans in an availability row."""
+    result = dict(row)
+    result['online'] = bool(result['online'])
+    result['mqtt_retained'] = bool(result['mqtt_retained'])
+    return result
+
+
+def get_latest_device_availability(device_id: str) -> Optional[Dict]:
+    """Get the latest broker-session state observed for one device."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT {DEVICE_AVAILABILITY_VIEW_COLUMN_SQL}
+            FROM device_availability_events
+            WHERE device_id = ?
+            ORDER BY received_at DESC, id DESC
+            LIMIT 1
+            """,
+            (device_id,)
+        )
+        row = cursor.fetchone()
+        return _normalize_availability_row(row) if row else None
+    finally:
+        conn.close()
+
+
+def get_latest_availability_record_id() -> Optional[int]:
+    """Get the most recent availability-event row ID."""
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute("SELECT MAX(id) AS latest_id FROM device_availability_events")
         row = cursor.fetchone()
         return row['latest_id'] if row else None
     finally:
@@ -843,6 +952,8 @@ def get_available_bms_ids() -> List[str]:
                 SELECT bms_id AS device_id FROM bms_telemetry
                 UNION
                 SELECT device_id FROM device_status_checkins
+                UNION
+                SELECT device_id FROM device_availability_events
             )
             ORDER BY device_id ASC
         """)

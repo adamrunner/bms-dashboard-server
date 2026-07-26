@@ -251,6 +251,12 @@ still pending and remains coupled to the alerting slice.
 
 ## Phase 6: MQTT availability
 
+Implementation status (2026-07-25): firmware last will and graceful offline
+publication, broker ACL/configuration, transition persistence, latest-state
+API and Socket.IO updates, and the selected-device availability badge are
+implemented locally. Anton deployment and forced-link canary validation remain
+pending.
+
 ### Firmware and broker
 
 1. Configure the ESP-IDF MQTT last will before client initialization.

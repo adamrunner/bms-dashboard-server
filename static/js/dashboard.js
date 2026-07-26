@@ -11,6 +11,7 @@ let latestDataRequestId = 0;
 let fetchStatusTimer = null;
 let bmsSelectionReady = false;
 let latestDeviceStatus = null;
+let latestDeviceAvailability = null;
 let deviceStatusAgeTimer = null;
 
 const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m', '10m', '15m', '30m'];
@@ -124,6 +125,9 @@ document.addEventListener('DOMContentLoaded', function() {
     deviceStatusAgeTimer = setInterval(() => {
         if (latestDeviceStatus) {
             updateDeviceStatusReceivedTime(latestDeviceStatus);
+        }
+        if (latestDeviceAvailability) {
+            renderDeviceAvailability(latestDeviceAvailability);
         }
     }, 30000);
 });
@@ -555,6 +559,12 @@ function connectWebSocket() {
         }
     });
 
+    socket.on('device_availability_update', function(availability) {
+        if (availability?.device_id === currentBmsId) {
+            renderDeviceAvailability(availability);
+        }
+    });
+
     socket.on('connect_error', function(error) {
         console.error('WebSocket connection error:', error);
     });
@@ -605,6 +615,7 @@ function loadBmsIds() {
 function refreshDashboardData(sourceModule = 'time') {
     updateUrlState();
     loadDeviceStatus();
+    loadDeviceAvailability();
     if (document.getElementById('autoRefresh').checked && socket && socket.connected) {
         setLoadingState(true, 'Loading telemetry data...', sourceModule);
         sendViewSubscription();
@@ -768,6 +779,57 @@ function loadDeviceStatus() {
                 error.name === 'AbortError'
                     ? 'Device status fetch timed out'
                     : 'Device status fetch failed',
+                error.name === 'AbortError' ? 'warning' : 'error'
+            );
+        });
+}
+
+function renderDeviceAvailability(availability) {
+    latestDeviceAvailability =
+        availability && availability.device_id ? availability : null;
+    const badge = document.getElementById('deviceAvailabilityBadge');
+
+    if (!latestDeviceAvailability) {
+        badge.textContent = 'MQTT unknown';
+        badge.className = 'badge text-bg-secondary';
+        badge.title = 'No MQTT availability record received';
+        return;
+    }
+
+    const receivedAt = new Date(latestDeviceAvailability.received_at * 1000);
+    const ageSeconds = Math.max(
+        0,
+        Math.floor((Date.now() - receivedAt.getTime()) / 1000)
+    );
+    const state = latestDeviceAvailability.online ? 'online' : 'offline';
+    badge.textContent = `MQTT ${state} · ${formatAge(ageSeconds)}`;
+    badge.className = latestDeviceAvailability.online
+        ? 'badge text-bg-success'
+        : 'badge text-bg-danger';
+    badge.title =
+        `Broker session ${state} since ${receivedAt.toLocaleString()}`;
+}
+
+function loadDeviceAvailability() {
+    if (!currentBmsId) {
+        renderDeviceAvailability(null);
+        return;
+    }
+
+    const url = '/api/device-availability/latest?bms_id='
+        + encodeURIComponent(currentBmsId);
+    fetchJsonWithTimeout(url, {}, 8000)
+        .then(availability => {
+            if (!availability.device_id || availability.device_id === currentBmsId) {
+                renderDeviceAvailability(availability);
+            }
+        })
+        .catch(error => {
+            console.error('Error loading device availability:', error);
+            setFetchStatus(
+                error.name === 'AbortError'
+                    ? 'Device availability fetch timed out'
+                    : 'Device availability fetch failed',
                 error.name === 'AbortError' ? 'warning' : 'error'
             );
         });

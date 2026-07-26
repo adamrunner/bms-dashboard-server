@@ -13,7 +13,8 @@ from database_queries import (
     get_latest_reading, get_statistics, get_data_count, get_available_bms_ids,
     get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds,
     should_aggregate_view, ensure_database_schema, validate_database_schema,
-    get_latest_record_id, get_latest_device_status, get_latest_status_record_id
+    get_latest_record_id, get_latest_device_status, get_latest_status_record_id,
+    get_latest_device_availability, get_latest_availability_record_id
 )
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
@@ -51,6 +52,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 # Global variables for real-time monitoring
 last_seen_record_id = None
 last_seen_status_id = None
+last_seen_availability_id = None
 monitoring_thread = None
 monitoring_active = False
 connected_clients = set()
@@ -97,7 +99,8 @@ def normalize_view_config(data=None):
 
 def background_monitor():
     """Background thread to monitor database for new data"""
-    global last_seen_record_id, last_seen_status_id, monitoring_active, last_stats_update
+    global last_seen_record_id, last_seen_status_id, last_seen_availability_id
+    global monitoring_active, last_stats_update
     
     print(f"Background monitor started, initial record id: {last_seen_record_id}")
     
@@ -111,6 +114,7 @@ def background_monitor():
             current_time = int(time.time())
             current_latest_record_id = get_latest_record_id()
             current_latest_status_id = get_latest_status_record_id()
+            current_latest_availability_id = get_latest_availability_record_id()
 
             if current_latest_record_id and current_latest_record_id != last_seen_record_id:
                 print(
@@ -187,6 +191,34 @@ def background_monitor():
                         room=sid
                     )
                 last_seen_status_id = current_latest_status_id
+
+            if (
+                current_latest_availability_id
+                and current_latest_availability_id != last_seen_availability_id
+            ):
+                print(
+                    "New device availability detected! "
+                    f"Record ID: {last_seen_availability_id} -> "
+                    f"{current_latest_availability_id}"
+                )
+                for sid in list(connected_clients):
+                    view_cfg = client_view_config.get(sid, DEFAULT_VIEW_CONFIG)
+                    bms_filter = view_cfg.get('bms_id')
+                    if not bms_filter:
+                        continue
+                    availability = get_latest_device_availability(bms_filter)
+                    if not availability:
+                        continue
+                    availability['received_age_seconds'] = max(
+                        0,
+                        current_time - availability['received_at']
+                    )
+                    socketio.server.emit(
+                        'device_availability_update',
+                        availability,
+                        room=sid
+                    )
+                last_seen_availability_id = current_latest_availability_id
             
             # Update statistics every 60 seconds
             if current_time - last_stats_update >= 60:
@@ -303,6 +335,27 @@ def api_latest_device_status():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/device-availability/latest')
+def api_latest_device_availability():
+    """API endpoint for one device's latest MQTT broker-session state."""
+    bms_id = request.args.get('bms_id', default=None, type=str)
+    if not bms_id:
+        return jsonify({'error': 'bms_id is required'}), 400
+
+    try:
+        availability = get_latest_device_availability(bms_id)
+        if not availability:
+            return jsonify({})
+        availability['received_age_seconds'] = max(
+            0,
+            int(time.time()) - availability['received_at']
+        )
+        return jsonify(availability)
+    except Exception as e:
+        print(f"Error fetching latest device availability: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/health')
 def api_health():
     """Health check endpoint"""
@@ -369,7 +422,8 @@ def test_websocket():
 @socketio.on('connect')
 def handle_connect(auth):
     """Handle client connection"""
-    global monitoring_active, monitoring_thread, connected_clients, last_seen_record_id
+    global monitoring_active, monitoring_thread, connected_clients
+    global last_seen_record_id, last_seen_status_id, last_seen_availability_id
     
     print(f'Client connected: {request.sid}')
     sid = request.sid
@@ -381,6 +435,8 @@ def handle_connect(auth):
     if not monitoring_active:
         print("Starting background monitoring thread...")
         last_seen_record_id = get_latest_record_id()
+        last_seen_status_id = get_latest_status_record_id()
+        last_seen_availability_id = get_latest_availability_record_id()
         monitoring_active = True
         # Use Flask-SocketIO's background task instead of threading
         socketio.start_background_task(background_monitor)
@@ -480,22 +536,26 @@ def internal_error(error):
 
 def initialize_monitoring():
     """Initialize the monitoring system"""
-    global last_seen_record_id, last_seen_status_id, last_stats_update
+    global last_seen_record_id, last_seen_status_id, last_seen_availability_id
+    global last_stats_update
     
     try:
         ensure_database_schema()
         validate_database_schema()
         last_seen_record_id = get_latest_record_id()
         last_seen_status_id = get_latest_status_record_id()
+        last_seen_availability_id = get_latest_availability_record_id()
         last_stats_update = int(time.time())  # Initialize stats timer
         print(
-            "Monitoring initialized with latest telemetry/status record ids "
-            f"{last_seen_record_id}/{last_seen_status_id}"
+            "Monitoring initialized with latest telemetry/status/availability "
+            f"record ids {last_seen_record_id}/{last_seen_status_id}/"
+            f"{last_seen_availability_id}"
         )
     except Exception as e:
         print(f"Error initializing monitoring: {e}")
         last_seen_record_id = None
         last_seen_status_id = None
+        last_seen_availability_id = None
         last_stats_update = int(time.time())
 
 

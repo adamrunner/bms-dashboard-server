@@ -165,7 +165,8 @@ verify_logger_connection() {
     for attempt in {1..15}; do
         logs="$(docker logs --since 2m "$logger_container" 2>&1 || true)"
         if grep -q "Connected to MQTT broker" <<<"$logs" &&
-            grep -q "Subscribed" <<<"$logs"; then
+            grep -q "Subscribed" <<<"$logs" &&
+            grep -q "bms/availability/+" <<<"$logs"; then
             return 0
         fi
         sleep 2
@@ -209,6 +210,12 @@ provision() {
     grep -q '^pattern write bms/status/%u$' \
         "${app_dir}/mosquitto/config/acl" ||
         fail "deployed ACL does not contain the device status topic policy"
+    grep -q '^pattern write bms/availability/%u$' \
+        "${app_dir}/mosquitto/config/acl" ||
+        fail "deployed ACL does not contain the device availability topic policy"
+    grep -q '^topic read bms/availability/+$' \
+        "${app_dir}/mosquitto/config/acl" ||
+        fail "deployed ACL does not let the logger read device availability"
 
     create_backup
     trap on_error ERR

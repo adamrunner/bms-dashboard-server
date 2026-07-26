@@ -19,7 +19,8 @@ import paho.mqtt.client as mqtt
 from database_queries import (
     ensure_database_schema,
     create_db_connection,
-    insert_device_status_checkin
+    insert_device_status_checkin,
+    insert_device_availability_event,
 )
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
@@ -86,6 +87,10 @@ MQTT_PORT = int(os.getenv("MQTT_PORT", "1883"))
 MQTT_USERNAME, MQTT_PASSWORD = resolve_mqtt_credentials()
 MQTT_TOPIC = os.getenv("MQTT_TOPIC", "bms/telemetry/+")
 MQTT_STATUS_TOPIC = os.getenv("MQTT_STATUS_TOPIC", "bms/status/+")
+MQTT_AVAILABILITY_TOPIC = os.getenv(
+    "MQTT_AVAILABILITY_TOPIC",
+    "bms/availability/+"
+)
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
 
 INSERT_COLUMNS = ', '.join(EXPECTED_COLUMNS)
@@ -372,6 +377,79 @@ def insert_status_data(payload: str, topic: str, mqtt_retained: bool = False):
     return row_id
 
 
+def normalize_availability_payload(
+    payload: str,
+    topic: str,
+    mqtt_retained: bool = False
+) -> dict:
+    """Validate and normalize one schema-v1 MQTT availability document."""
+    try:
+        parsed = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON: {exc.msg}") from exc
+
+    if not isinstance(parsed, dict):
+        raise ValueError("availability payload must be a JSON object")
+    if type(parsed.get('schema_version')) is not int:
+        raise ValueError("schema_version must be an integer")
+    if parsed['schema_version'] != 1:
+        raise ValueError(f"unsupported schema_version {parsed['schema_version']}")
+
+    device_id = parsed.get('device_id')
+    if not isinstance(device_id, str) or not device_id or len(device_id) > 64:
+        raise ValueError("device_id must be a non-empty string up to 64 characters")
+    if not DEVICE_ID_RE.fullmatch(device_id):
+        raise ValueError("device_id contains unsupported characters")
+
+    boot_id = parsed.get('boot_id')
+    if not isinstance(boot_id, str) or not boot_id or len(boot_id) > 64:
+        raise ValueError("boot_id must be a non-empty string up to 64 characters")
+    if type(parsed.get('online')) is not bool:
+        raise ValueError("online must be a boolean")
+
+    topic_device_id = topic.rsplit('/', 1)[-1]
+    if topic_device_id != device_id:
+        raise ValueError(
+            f"topic device ID {topic_device_id!r} does not match payload {device_id!r}"
+        )
+
+    canonical_payload = json.dumps(parsed, sort_keys=True, separators=(',', ':'))
+    return {
+        'device_id': device_id,
+        'boot_id': boot_id,
+        'online': parsed['online'],
+        'mqtt_retained': bool(mqtt_retained),
+        'payload_sha256': hashlib.sha256(canonical_payload.encode('utf-8')).hexdigest(),
+        'raw_payload': canonical_payload,
+        'received_at': int(time.time()),
+    }
+
+
+def insert_availability_data(
+    payload: str,
+    topic: str,
+    mqtt_retained: bool = False
+):
+    """Validate and persist one MQTT availability transition."""
+    availability = normalize_availability_payload(payload, topic, mqtt_retained)
+    row_id = insert_device_availability_event(availability)
+    if row_id is None:
+        logger.info(
+            "Ignored repeated %s availability for %s boot %s",
+            "online" if availability['online'] else "offline",
+            availability['device_id'],
+            availability['boot_id']
+        )
+    else:
+        logger.info(
+            "Inserted %s availability row %s for %s",
+            "online" if availability['online'] else "offline",
+            row_id,
+            availability['device_id']
+        )
+    return row_id
+
+
 def on_connect(client, userdata, flags, rc):
     """Callback for when client connects to MQTT broker"""
     logger.debug(f"Connection callback called with rc={rc}")
@@ -379,12 +457,14 @@ def on_connect(client, userdata, flags, rc):
         logger.info("Connected to MQTT broker")
         result, mid = client.subscribe([
             (MQTT_TOPIC, 0),
-            (MQTT_STATUS_TOPIC, 1)
+            (MQTT_STATUS_TOPIC, 1),
+            (MQTT_AVAILABILITY_TOPIC, 1),
         ])
         logger.info(
-            "Subscribed to topics: %s and %s, result=%s, mid=%s",
+            "Subscribed to topics: %s, %s, and %s, result=%s, mid=%s",
             MQTT_TOPIC,
             MQTT_STATUS_TOPIC,
+            MQTT_AVAILABILITY_TOPIC,
             result,
             mid
         )
@@ -404,7 +484,9 @@ def on_message(client, userdata, msg):
         logger.info(f"Received message on topic {msg.topic}")
         logger.debug(f"Payload: {payload}")
 
-        if mqtt.topic_matches_sub(MQTT_STATUS_TOPIC, msg.topic):
+        if mqtt.topic_matches_sub(MQTT_AVAILABILITY_TOPIC, msg.topic):
+            insert_availability_data(payload, msg.topic, msg.retain)
+        elif mqtt.topic_matches_sub(MQTT_STATUS_TOPIC, msg.topic):
             insert_status_data(payload, msg.topic, msg.retain)
         elif mqtt.topic_matches_sub(MQTT_TOPIC, msg.topic):
             insert_telemetry_data(payload)
