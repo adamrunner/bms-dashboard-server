@@ -1,0 +1,55 @@
+{
+  "evidence_date": "2026-07-26",
+  "device_alias": "primary-field-gateway",
+  "counts": {
+    "card_rows": 27345,
+    "card_malformed_rows": 0,
+    "card_only_rows": 790,
+    "production_only_unique_rows": 125,
+    "production_duplicate_excess": 749,
+    "production_duplicate_excess_july_26": 600,
+    "availability_events": 0,
+    "spool_pending_bytes_at_end": 0
+  },
+  "derived_counts": {
+    "production_rows": 27429,
+    "production_unique_rows": 26680
+  },
+  "source_hashes": {
+    "sd_bms_2026_07_15": {
+      "bytes": 131622,
+      "sha256": "cdf2dbc7585dc7b86d35443f06fed629d034934f7761abfb2c737dc26caf218f"
+    },
+    "sd_bms_unsynced": {
+      "bytes": 11629,
+      "sha256": "67c7bd089c5bf3fe66cc681fb1be57b5a70bf83ac53e4539ce89f2954951ac21"
+    },
+    "sd_bms_2026_07_25": {
+      "bytes": 677749,
+      "sha256": "f68ceab2f657c80936a5e5621fcbfb1c07b35e89388e4fd7dfc79045eb38e414"
+    },
+    "sd_bms_2026_07_26": {
+      "bytes": 3649378,
+      "sha256": "04159c13e94bcaf5c4cea259ede446c0b77114465606d1d7e0c40f5023e22f52"
+    },
+    "sd_spool_cursor": {
+      "bytes": 1,
+      "sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9"
+    },
+    "backend_schema": {
+      "sha256": "0dac1f0deffbce557238524e0e4325c9bb2bcc2d42e32791da76049e2a6e690b"
+    }
+  },
+  "versions": {
+    "firmware_field_image": "7957a71",
+    "firmware_implementation_baseline": "6c73a38",
+    "backend_repository": "940bc2a",
+    "production_backend_reported": "940bc2a",
+    "esp_idf": "v5.5"
+  },
+  "privacy": {
+    "contains_raw_telemetry": false,
+    "contains_credentials_or_sim_identifiers": false,
+    "notes": "Only aggregate counts, byte sizes, and one-way file digests are retained."
+  }
+}
