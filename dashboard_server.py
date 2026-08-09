@@ -13,6 +13,7 @@ from flask_socketio import SocketIO, emit
 from database_queries import (
     get_latest_reading, get_statistics, get_data_count, get_available_bms_ids,
     get_telemetry_data_for_view, get_latest_point_for_view, resolve_bucket_seconds,
+    get_latest_dashboard_point,
     should_aggregate_view, ensure_database_schema, validate_database_schema,
     get_latest_record_id, get_latest_device_status, get_latest_status_record_id,
     get_latest_device_availability, get_latest_availability_record_id,
@@ -152,6 +153,11 @@ def background_monitor():
                             )
                             socketio.server.emit('telemetry_update', {
                                 'point': latest_point,
+                                # Metric cards always show the newest raw
+                                # reading, never a bucket average.
+                                'latest_reading': get_latest_dashboard_point(
+                                    bms_filter
+                                ),
                                 'meta': {
                                     'bucket_seconds': bucket_seconds,
                                     'is_aggregated': should_aggregate_view(
@@ -283,7 +289,11 @@ def api_data():
             view_config['target_points']
         )
         print(f"API: Returning {len(data)} records (bucket {meta['bucket_seconds']}s)")
-        return jsonify({'records': data, 'meta': meta})
+        return jsonify({
+            'records': data,
+            'latest_reading': get_latest_dashboard_point(view_config['bms_id']),
+            'meta': meta
+        })
     except Exception as e:
         print(f"Error fetching data: {e}")
         return jsonify({'error': str(e)}), 500
@@ -764,7 +774,11 @@ def handle_set_view(data):
             view_config['resolution'],
             view_config['target_points']
         )
-        emit('view_data', {'records': records, 'meta': meta})
+        emit('view_data', {
+            'records': records,
+            'latest_reading': get_latest_dashboard_point(view_config['bms_id']),
+            'meta': meta
+        })
     except Exception as e:
         print(f"Error handling set_view: {e}")
         emit('error', {'message': 'Failed to update live view settings'})

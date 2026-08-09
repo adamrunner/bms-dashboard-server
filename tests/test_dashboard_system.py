@@ -1161,6 +1161,94 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(latest_point["sample_count"], 2)
         self.assertAlmostEqual(latest_point["pack_voltage_v"], 13.0)
 
+    def test_aggregated_api_view_reports_unaveraged_latest_reading(self):
+        now = int(time.time())
+        bucket_start = (now - 60) - ((now - 60) % 30)
+        for offset, voltage in enumerate([13.0, 13.2, 13.4, 13.6]):
+            bms_mqtt_logger.insert_telemetry_data(
+                build_payload("bms-card", bucket_start + offset * 2, pack_voltage=voltage)
+            )
+
+        client = dashboard_server.app.test_client()
+        response = client.get("/api/data?hours=0.5&bms_id=bms-card&resolution=auto")
+        payload = response.get_json()
+
+        self.assertTrue(payload["meta"]["is_aggregated"])
+        self.assertAlmostEqual(payload["records"][-1]["pack_voltage_v"], 13.3)
+        self.assertAlmostEqual(payload["latest_reading"]["pack_voltage_v"], 13.6)
+        self.assertEqual(payload["latest_reading"]["timestamp"], bucket_start + 6)
+
+    def test_socketio_aggregated_view_and_update_carry_raw_latest_reading(self):
+        now = int(time.time())
+        bucket_start = (now - 90) - ((now - 90) % 30)
+        for offset, voltage in enumerate([13.0, 13.6]):
+            bms_mqtt_logger.insert_telemetry_data(
+                build_payload("bms-card-live", bucket_start + offset * 2, pack_voltage=voltage)
+            )
+
+        with mock.patch.object(
+            dashboard_server.socketio,
+            "start_background_task",
+            return_value=None
+        ):
+            client = dashboard_server.socketio.test_client(dashboard_server.app)
+            client.get_received()
+            client.emit(
+                "set_view",
+                {
+                    "hours": 0.5,
+                    "bms_id": "bms-card-live",
+                    "resolution": "auto",
+                    "target_points": 300
+                }
+            )
+            view_messages = [
+                message for message in client.get_received()
+                if message["name"] == "view_data"
+            ]
+
+        self.assertEqual(len(view_messages), 1)
+        view_payload = view_messages[0]["args"][0]
+        self.assertTrue(view_payload["meta"]["is_aggregated"])
+        self.assertAlmostEqual(view_payload["records"][-1]["pack_voltage_v"], 13.3)
+        self.assertAlmostEqual(view_payload["latest_reading"]["pack_voltage_v"], 13.6)
+
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("bms-card-live", bucket_start + 4, pack_voltage=14.0)
+        )
+        dashboard_server.last_seen_record_id = None
+        dashboard_server.last_seen_status_id = (
+            database_queries.get_latest_status_record_id()
+        )
+        dashboard_server.last_seen_availability_id = (
+            database_queries.get_latest_availability_record_id()
+        )
+        dashboard_server.monitoring_active = True
+
+        def stop_monitor(_seconds):
+            dashboard_server.monitoring_active = False
+
+        with mock.patch.object(
+            dashboard_server.socketio,
+            "sleep",
+            side_effect=stop_monitor
+        ):
+            dashboard_server.background_monitor()
+
+        received = client.get_received()
+        client.disconnect()
+        telemetry_messages = [
+            message for message in received
+            if message["name"] == "telemetry_update"
+        ]
+
+        self.assertEqual(len(telemetry_messages), 1)
+        update = telemetry_messages[0]["args"][0]
+        self.assertTrue(update["meta"]["is_aggregated"])
+        self.assertAlmostEqual(update["point"]["pack_voltage_v"], 40.6 / 3)
+        self.assertAlmostEqual(update["latest_reading"]["pack_voltage_v"], 14.0)
+        self.assertEqual(update["latest_reading"]["timestamp"], bucket_start + 4)
+
     def test_socketio_set_view_returns_snapshot_data(self):
         now = int(time.time())
         bms_mqtt_logger.insert_telemetry_data(build_payload("bms-socket", now, pack_voltage=13.6))

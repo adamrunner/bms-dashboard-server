@@ -317,11 +317,12 @@ function getDataRequestUrl() {
 
 function normalizeDataPayload(payload) {
     if (Array.isArray(payload)) {
-        return { records: payload, meta: {} };
+        return { records: payload, latestReading: null, meta: {} };
     }
 
     return {
         records: payload.records || [],
+        latestReading: payload.latest_reading || null,
         meta: payload.meta || {}
     };
 }
@@ -542,7 +543,7 @@ function connectWebSocket() {
         }
 
         updateChartsWithNewData(point, meta);
-        updateCurrentValues(point);
+        updateCurrentValues(payload.latest_reading);
         triggerGlowEffect();
     });
 
@@ -551,6 +552,7 @@ function connectWebSocket() {
         setLoadingState(false);
         clearFetchStatus();
         updateChartsWithHistoricalData(normalized.records, normalized.meta);
+        updateCurrentValues(normalized.latestReading);
     });
 
     socket.on('statistics', function(stats) {
@@ -653,6 +655,7 @@ function loadInitialData(sourceModule = 'time') {
             clearFetchStatus();
             const normalized = normalizeDataPayload(payload);
             updateChartsWithHistoricalData(normalized.records, normalized.meta);
+            updateCurrentValues(normalized.latestReading);
         })
         .catch(error => {
             if (error.name === 'AbortError') {
@@ -883,8 +886,6 @@ function updateChartsWithHistoricalData(data, meta = {}) {
     Object.values(charts).forEach(chart => {
         chart.update('none');
     });
-
-    updateCurrentValues(data[data.length - 1]);
 }
 
 function pushOrReplace(dataset, point, replaceTimestamp) {
@@ -962,13 +963,21 @@ function updateChartsWithNewData(data, meta = {}) {
     });
 }
 
+// Metric cards show the newest raw reading only. They must never be fed a
+// bucket average from an aggregated view, whatever the selected time range.
 function updateCurrentValues(data) {
+    if (!data) {
+        return;
+    }
+
     document.getElementById('currentVoltage').textContent = (data.pack_voltage_v || 0).toFixed(2);
     document.getElementById('currentCurrent').textContent = (data.pack_current_a || 0).toFixed(2);
     document.getElementById('currentSoC').textContent = (data.state_of_charge_pct || 0).toFixed(1);
     document.getElementById('currentPower').textContent = (data.power_w || 0).toFixed(1);
 
-    document.getElementById('lastUpdate').textContent = 'Last Update: ' + new Date().toLocaleTimeString();
+    const readingTime = data.timestamp ? new Date(data.timestamp * 1000) : new Date();
+    document.getElementById('lastUpdate').textContent =
+        'Last Update: ' + readingTime.toLocaleTimeString();
 }
 
 function loadStatistics() {
