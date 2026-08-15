@@ -1022,27 +1022,45 @@ def _fetch_raw_data(hours: float, bms_id: Optional[str] = None) -> List[Dict]:
         conn.close()
 
 
-def _fetch_dashboard_raw_data(hours: float, bms_id: Optional[str] = None) -> List[Dict]:
+def _window_clause_and_params(
+    hours: float,
+    start_ts: Optional[int] = None,
+    end_ts: Optional[int] = None
+) -> Tuple[str, List]:
+    """Build the timestamp window predicate for a view query.
+
+    An explicit [start_ts, end_ts] window (inclusive) wins when both bounds
+    are provided; otherwise fall back to the rolling now-based cutoff.
+    """
+    if start_ts is not None and end_ts is not None:
+        return "timestamp >= ? AND timestamp <= ?", [start_ts, end_ts]
+    cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
+    return "timestamp >= ?", [cutoff_time]
+
+
+def _fetch_dashboard_raw_data(
+    hours: float,
+    bms_id: Optional[str] = None,
+    start_ts: Optional[int] = None,
+    end_ts: Optional[int] = None
+) -> List[Dict]:
     """Get raw dashboard telemetry data with only chart-required columns."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
+        window_clause, params = _window_clause_and_params(hours, start_ts, end_ts)
 
+        bms_clause = ""
         if bms_id:
-            cursor.execute(f"""
-                SELECT {DASHBOARD_VIEW_COLUMN_SQL}
-                FROM bms_telemetry
-                WHERE timestamp_valid = 1 AND timestamp >= ? AND bms_id = ?
-                ORDER BY timestamp ASC
-            """, (cutoff_time, bms_id))
-        else:
-            cursor.execute(f"""
-                SELECT {DASHBOARD_VIEW_COLUMN_SQL}
-                FROM bms_telemetry
-                WHERE timestamp_valid = 1 AND timestamp >= ?
-                ORDER BY timestamp ASC
-            """, (cutoff_time,))
+            bms_clause = " AND bms_id = ?"
+            params.append(bms_id)
+
+        cursor.execute(f"""
+            SELECT {DASHBOARD_VIEW_COLUMN_SQL}
+            FROM bms_telemetry
+            WHERE timestamp_valid = 1 AND {window_clause}{bms_clause}
+            ORDER BY timestamp ASC
+        """, params)
 
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
@@ -1050,57 +1068,49 @@ def _fetch_dashboard_raw_data(hours: float, bms_id: Optional[str] = None) -> Lis
         conn.close()
 
 
-def _fetch_aggregated_data(hours: float, bucket_seconds: int, bms_id: Optional[str] = None) -> List[Dict]:
+def _fetch_aggregated_data(
+    hours: float,
+    bucket_seconds: int,
+    bms_id: Optional[str] = None,
+    start_ts: Optional[int] = None,
+    end_ts: Optional[int] = None
+) -> List[Dict]:
     """Get bucketed telemetry data where each row is an aggregated time bucket."""
     conn = get_db_connection()
     try:
         cursor = conn.cursor()
-        cutoff_time = int((datetime.now() - timedelta(hours=hours)).timestamp())
+        window_clause, window_params = _window_clause_and_params(
+            hours, start_ts, end_ts
+        )
 
+        bms_clause = ""
+        params = [bucket_seconds, bucket_seconds, *window_params]
         if bms_id:
-            cursor.execute("""
-                SELECT
-                    CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
-                    COUNT(*) AS sample_count,
-                    AVG(pack_voltage_v) AS pack_voltage_v,
-                    AVG(pack_current_a) AS pack_current_a,
-                    AVG(state_of_charge_pct) AS state_of_charge_pct,
-                    AVG(power_w) AS power_w,
-                    AVG(cells_v_1) AS cells_v_1,
-                    AVG(cells_v_2) AS cells_v_2,
-                    AVG(cells_v_3) AS cells_v_3,
-                    AVG(cells_v_4) AS cells_v_4,
-                    AVG(cell_voltage_delta_v) AS cell_voltage_delta_v,
-                    AVG(temps_c_1) AS temps_c_1,
-                    AVG(temps_c_2) AS temps_c_2,
-                    AVG(temps_c_3) AS temps_c_3
-                FROM bms_telemetry
-                WHERE timestamp_valid = 1 AND timestamp >= ? AND bms_id = ?
-                GROUP BY CAST((timestamp / ?) AS INTEGER)
-                ORDER BY timestamp ASC
-            """, (bucket_seconds, bucket_seconds, cutoff_time, bms_id, bucket_seconds))
-        else:
-            cursor.execute("""
-                SELECT
-                    CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
-                    COUNT(*) AS sample_count,
-                    AVG(pack_voltage_v) AS pack_voltage_v,
-                    AVG(pack_current_a) AS pack_current_a,
-                    AVG(state_of_charge_pct) AS state_of_charge_pct,
-                    AVG(power_w) AS power_w,
-                    AVG(cells_v_1) AS cells_v_1,
-                    AVG(cells_v_2) AS cells_v_2,
-                    AVG(cells_v_3) AS cells_v_3,
-                    AVG(cells_v_4) AS cells_v_4,
-                    AVG(cell_voltage_delta_v) AS cell_voltage_delta_v,
-                    AVG(temps_c_1) AS temps_c_1,
-                    AVG(temps_c_2) AS temps_c_2,
-                    AVG(temps_c_3) AS temps_c_3
-                FROM bms_telemetry
-                WHERE timestamp_valid = 1 AND timestamp >= ?
-                GROUP BY CAST((timestamp / ?) AS INTEGER)
-                ORDER BY timestamp ASC
-            """, (bucket_seconds, bucket_seconds, cutoff_time, bucket_seconds))
+            bms_clause = " AND bms_id = ?"
+            params.append(bms_id)
+        params.append(bucket_seconds)
+
+        cursor.execute(f"""
+            SELECT
+                CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
+                COUNT(*) AS sample_count,
+                AVG(pack_voltage_v) AS pack_voltage_v,
+                AVG(pack_current_a) AS pack_current_a,
+                AVG(state_of_charge_pct) AS state_of_charge_pct,
+                AVG(power_w) AS power_w,
+                AVG(cells_v_1) AS cells_v_1,
+                AVG(cells_v_2) AS cells_v_2,
+                AVG(cells_v_3) AS cells_v_3,
+                AVG(cells_v_4) AS cells_v_4,
+                AVG(cell_voltage_delta_v) AS cell_voltage_delta_v,
+                AVG(temps_c_1) AS temps_c_1,
+                AVG(temps_c_2) AS temps_c_2,
+                AVG(temps_c_3) AS temps_c_3
+            FROM bms_telemetry
+            WHERE timestamp_valid = 1 AND {window_clause}{bms_clause}
+            GROUP BY CAST((timestamp / ?) AS INTEGER)
+            ORDER BY timestamp ASC
+        """, params)
 
         rows = cursor.fetchall()
         return [dict(row) for row in rows]
@@ -1112,16 +1122,44 @@ def get_telemetry_data_for_view(
     hours: float = 1,
     bms_id: Optional[str] = None,
     resolution: str = 'auto',
-    target_points: int = 300
+    target_points: int = 300,
+    start_ts: Optional[int] = None,
+    end_ts: Optional[int] = None
 ) -> Tuple[List[Dict], Dict]:
-    """Get telemetry data and metadata for a dashboard view with optional bucketing."""
-    bucket_seconds = resolve_bucket_seconds(hours, resolution, target_points)
-    is_aggregated = should_aggregate_view(hours, resolution, bucket_seconds)
+    """Get telemetry data and metadata for a dashboard view with optional bucketing.
+
+    When both start_ts and end_ts are provided (epoch seconds, end after
+    start), the view is an absolute [start_ts, end_ts] window and `hours`
+    is ignored for the data window; bucketing decisions use the window
+    duration instead.
+    """
+    is_absolute = (
+        isinstance(start_ts, int)
+        and isinstance(end_ts, int)
+        and end_ts > start_ts
+    )
+    if is_absolute:
+        duration_hours = (end_ts - start_ts) / 3600.0
+        window_start = start_ts
+        window_end = end_ts
+    else:
+        start_ts = None
+        end_ts = None
+        duration_hours = hours
+        window_end = int(datetime.now().timestamp())
+        window_start = int((datetime.now() - timedelta(hours=hours)).timestamp())
+
+    bucket_seconds = resolve_bucket_seconds(duration_hours, resolution, target_points)
+    is_aggregated = should_aggregate_view(duration_hours, resolution, bucket_seconds)
 
     if is_aggregated:
-        data = _fetch_aggregated_data(hours, bucket_seconds, bms_id)
+        data = _fetch_aggregated_data(
+            hours, bucket_seconds, bms_id, start_ts=start_ts, end_ts=end_ts
+        )
     else:
-        data = _fetch_dashboard_raw_data(hours, bms_id)
+        data = _fetch_dashboard_raw_data(
+            hours, bms_id, start_ts=start_ts, end_ts=end_ts
+        )
 
     source_record_count = (
         sum(row.get('sample_count') or 0 for row in data)
@@ -1138,6 +1176,9 @@ def get_telemetry_data_for_view(
         'hours': hours,
         'bms_id': bms_id,
         'unanchored_record_count': get_unanchored_telemetry_count(bms_id),
+        'mode': 'absolute' if is_absolute else 'live',
+        'start_ts': window_start,
+        'end_ts': window_end,
     }
     return data, metadata
 

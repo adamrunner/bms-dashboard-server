@@ -1,7 +1,10 @@
 // BMS Dashboard JavaScript
 let socket;
 let charts = {};
-let currentTimeRange = 0.017; // hours (1 minute default)
+let currentTimeRange = 0.017; // hours (1 minute default); in absolute mode this keeps the last live preset
+let currentRangeMode = 'live'; // 'live' | 'absolute'
+let absoluteStartTs = null; // epoch seconds (int) when currentRangeMode === 'absolute'
+let absoluteEndTs = null; // epoch seconds (int) when currentRangeMode === 'absolute'
 let currentBmsId = '';
 let currentResolution = 'auto';
 let targetPoints = 300;
@@ -15,6 +18,8 @@ let latestDeviceAvailability = null;
 let deviceStatusAgeTimer = null;
 
 const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m', '10m', '15m', '30m'];
+const MIN_ABSOLUTE_WINDOW_SECONDS = 10;
+const DRAG_SELECT_MIN_PIXELS = 10;
 const CHART_DATA_FIELDS = {
     voltage: ['pack_voltage_v'],
     current: ['pack_current_a'],
@@ -102,9 +107,154 @@ const chartConfig = {
     }
 };
 
+// Inline Chart.js plugin: draws the drag-to-zoom selection rectangle.
+const dragSelectPlugin = {
+    id: 'dragSelect',
+    afterDraw(chart) {
+        const drag = chart.$dragSelect;
+        const area = chart.chartArea;
+        if (!drag || !drag.active || !area) {
+            return;
+        }
+
+        const left = Math.max(area.left, Math.min(drag.startX, drag.currentX));
+        const right = Math.min(area.right, Math.max(drag.startX, drag.currentX));
+        if (right - left < 1) {
+            return;
+        }
+
+        const ctx = chart.ctx;
+        ctx.save();
+        ctx.fillStyle = 'rgba(0,123,255,0.15)';
+        ctx.fillRect(left, area.top, right - left, area.bottom - area.top);
+        ctx.strokeStyle = 'rgba(0,123,255,0.6)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(left + 0.5, area.top + 0.5, right - left - 1, area.bottom - area.top - 1);
+        ctx.restore();
+    }
+};
+Chart.register(dragSelectPlugin);
+
+// Hand-rolled drag-to-zoom: pointer events on each chart canvas. Releasing a
+// drag wider than DRAG_SELECT_MIN_PIXELS converts the selected pixel span to an
+// absolute time window and refetches every chart server-side.
+function setupDragToZoom(chart) {
+    const canvas = chart.canvas;
+    canvas.style.cursor = 'crosshair';
+    canvas.style.touchAction = 'none';
+
+    const state = { active: false, pointerId: null, captured: false, startX: 0, currentX: 0 };
+    chart.$dragSelect = state;
+
+    const cancelDrag = () => {
+        if (!state.active) {
+            return;
+        }
+        state.active = false;
+        if (state.pointerId !== null) {
+            try {
+                if (canvas.hasPointerCapture(state.pointerId)) {
+                    canvas.releasePointerCapture(state.pointerId);
+                }
+            } catch (err) {
+                // Pointer already released; nothing to clean up.
+            }
+        }
+        state.pointerId = null;
+        state.captured = false;
+        chart.draw();
+    };
+    chart.$cancelDragSelect = cancelDrag;
+
+    canvas.addEventListener('pointerdown', event => {
+        if (event.button !== 0) {
+            return;
+        }
+        const area = chart.chartArea;
+        if (!area
+            || event.offsetX < area.left || event.offsetX > area.right
+            || event.offsetY < area.top || event.offsetY > area.bottom) {
+            return;
+        }
+        state.active = true;
+        state.pointerId = event.pointerId;
+        state.startX = event.offsetX;
+        state.currentX = event.offsetX;
+        try {
+            canvas.setPointerCapture(event.pointerId);
+            state.captured = true;
+        } catch (err) {
+            // Capture is best-effort; drag still works inside the canvas.
+        }
+        chart.draw();
+    });
+
+    canvas.addEventListener('pointermove', event => {
+        if (!state.active || event.pointerId !== state.pointerId) {
+            return;
+        }
+        state.currentX = event.offsetX;
+        chart.draw();
+    });
+
+    canvas.addEventListener('pointerup', event => {
+        if (!state.active || event.pointerId !== state.pointerId) {
+            return;
+        }
+        const area = chart.chartArea;
+        const startX = state.startX;
+        const endX = event.offsetX;
+        cancelDrag();
+
+        if (!area || Math.abs(endX - startX) < DRAG_SELECT_MIN_PIXELS) {
+            return;
+        }
+
+        const clampPixel = px => Math.min(area.right, Math.max(area.left, px));
+        // The time scale reports values in milliseconds.
+        const timeA = chart.scales.x.getValueForPixel(clampPixel(startX));
+        const timeB = chart.scales.x.getValueForPixel(clampPixel(endX));
+        if (!Number.isFinite(timeA) || !Number.isFinite(timeB)) {
+            return;
+        }
+
+        const startTs = Math.floor(Math.min(timeA, timeB) / 1000);
+        const endTs = Math.ceil(Math.max(timeA, timeB) / 1000);
+        enterAbsoluteMode(startTs, endTs, 'time');
+    });
+
+    canvas.addEventListener('pointercancel', event => {
+        if (state.active && event.pointerId === state.pointerId) {
+            cancelDrag();
+        }
+    });
+
+    canvas.addEventListener('pointerleave', () => {
+        // Capture keeps events coming while dragging past the chart edge, so
+        // only treat leaving as a cancel when capture was unavailable.
+        if (state.active && !state.captured) {
+            cancelDrag();
+        }
+    });
+}
+
+function cancelAllChartDrags() {
+    Object.values(charts).forEach(chart => {
+        if (chart.$dragSelect && chart.$dragSelect.active && chart.$cancelDragSelect) {
+            chart.$cancelDragSelect();
+        }
+    });
+}
+
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
     initializeCharts();
+    Object.values(charts).forEach(setupDragToZoom);
+    document.addEventListener('keydown', event => {
+        if (event.key === 'Escape') {
+            cancelAllChartDrags();
+        }
+    });
     applyInitialStateFromUrl();
     loadBmsIds();
 
@@ -160,8 +310,21 @@ function applyInitialStateFromUrl() {
         autoRefreshToggle.checked = !['0', 'false', 'off', 'no'].includes(autoRefreshParam.toLowerCase());
     }
 
+    const startParam = params.get('start');
+    const endParam = params.get('end');
+    if (startParam !== null && endParam !== null) {
+        const parsedStart = Number.parseInt(startParam, 10);
+        const parsedEnd = Number.parseInt(endParam, 10);
+        if (Number.isFinite(parsedStart) && Number.isFinite(parsedEnd) && parsedEnd > parsedStart) {
+            currentRangeMode = 'absolute';
+            absoluteStartTs = parsedStart;
+            absoluteEndTs = parsedEnd;
+        }
+    }
+
     resolutionSelect.value = currentResolution;
     updateActiveTimeRangeButton();
+    updateRangeUiState();
 }
 
 function updateUrlState() {
@@ -169,6 +332,14 @@ function updateUrlState() {
     url.searchParams.set('hours', String(currentTimeRange));
     url.searchParams.set('resolution', currentResolution);
     url.searchParams.set('auto_refresh', document.getElementById('autoRefresh').checked ? '1' : '0');
+
+    if (currentRangeMode === 'absolute' && absoluteStartTs !== null && absoluteEndTs !== null) {
+        url.searchParams.set('start', String(absoluteStartTs));
+        url.searchParams.set('end', String(absoluteEndTs));
+    } else {
+        url.searchParams.delete('start');
+        url.searchParams.delete('end');
+    }
 
     if (currentBmsId) {
         url.searchParams.set('bms_id', currentBmsId);
@@ -181,11 +352,169 @@ function updateUrlState() {
 
 function updateActiveTimeRangeButton() {
     const selectedHours = Number(currentTimeRange);
+    const isAbsolute = currentRangeMode === 'absolute';
     document.querySelectorAll('.time-range-btn').forEach(btn => {
+        if (btn.id === 'customRangeToggle') {
+            btn.classList.toggle('active', isAbsolute);
+            return;
+        }
         const buttonHours = Number.parseFloat(btn.dataset.hours || '');
-        const isActive = Number.isFinite(buttonHours) && Math.abs(buttonHours - selectedHours) < 0.0001;
+        const isActive = !isAbsolute
+            && Number.isFinite(buttonHours)
+            && Math.abs(buttonHours - selectedHours) < 0.0001;
         btn.classList.toggle('active', isActive);
     });
+}
+
+function tsToLocalInputValue(ts) {
+    const date = new Date(ts * 1000);
+    const pad = value => String(value).padStart(2, '0');
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+        + `T${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`;
+}
+
+function formatLiveRangeLabel(hours) {
+    const minutes = Math.round(hours * 60);
+    if (minutes < 60) {
+        return `last ${minutes} minute${minutes === 1 ? '' : 's'}`;
+    }
+    const wholeHours = Math.round(hours * 10) / 10;
+    return `last ${wholeHours} hour${wholeHours === 1 ? '' : 's'}`;
+}
+
+function formatAbsoluteRangeEndpoint(ts) {
+    return new Date(ts * 1000).toLocaleString(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit',
+        hour12: false
+    });
+}
+
+function setCustomRangeError(message) {
+    const errorElement = document.getElementById('customRangeError');
+    if (!errorElement) {
+        return;
+    }
+    errorElement.textContent = message;
+    errorElement.hidden = !message;
+}
+
+function updateRangeUiState() {
+    const summary = document.getElementById('rangeSummary');
+    const backButton = document.getElementById('backToLiveBtn');
+    const startInput = document.getElementById('customRangeStart');
+    const endInput = document.getElementById('customRangeEnd');
+    if (!summary || !backButton) {
+        return;
+    }
+
+    if (currentRangeMode === 'absolute') {
+        summary.textContent = `${formatAbsoluteRangeEndpoint(absoluteStartTs)} → `
+            + formatAbsoluteRangeEndpoint(absoluteEndTs);
+        backButton.hidden = false;
+        if (startInput && endInput) {
+            startInput.value = tsToLocalInputValue(absoluteStartTs);
+            endInput.value = tsToLocalInputValue(absoluteEndTs);
+        }
+    } else {
+        summary.textContent = `Live · ${formatLiveRangeLabel(Number(currentTimeRange))}`;
+        backButton.hidden = true;
+    }
+    setCustomRangeError('');
+}
+
+function toggleCustomRangePanel() {
+    const panel = document.getElementById('customRangePanel');
+    panel.hidden = !panel.hidden;
+    if (panel.hidden) {
+        return;
+    }
+
+    const startInput = document.getElementById('customRangeStart');
+    const endInput = document.getElementById('customRangeEnd');
+    if (!startInput.value || !endInput.value) {
+        const endTs = currentRangeMode === 'absolute'
+            ? absoluteEndTs
+            : Math.floor(Date.now() / 1000);
+        const startTs = currentRangeMode === 'absolute'
+            ? absoluteStartTs
+            : endTs - Math.max(60, Math.round(Number(currentTimeRange) * 3600));
+        startInput.value = tsToLocalInputValue(startTs);
+        endInput.value = tsToLocalInputValue(endTs);
+    }
+}
+
+function applyCustomRange() {
+    const startInput = document.getElementById('customRangeStart');
+    const endInput = document.getElementById('customRangeEnd');
+
+    if (!startInput.value || !endInput.value) {
+        setCustomRangeError('Both From and To are required.');
+        return;
+    }
+
+    // datetime-local values have no timezone suffix, so Date parses them as local time.
+    const startMs = new Date(startInput.value).getTime();
+    const endMs = new Date(endInput.value).getTime();
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) {
+        setCustomRangeError('Enter valid dates and times.');
+        return;
+    }
+
+    const startTs = Math.floor(startMs / 1000);
+    const endTs = Math.ceil(endMs / 1000);
+    if (endTs <= startTs) {
+        setCustomRangeError('To must be after From.');
+        return;
+    }
+
+    const nowTs = Math.ceil(Date.now() / 1000);
+    if (endTs > nowTs + 60) {
+        setCustomRangeError('To cannot be in the future.');
+        return;
+    }
+
+    setCustomRangeError('');
+    enterAbsoluteMode(startTs, endTs, 'time');
+}
+
+function enterAbsoluteMode(startTs, endTs, sourceModule = 'time') {
+    let start = Math.floor(Number(startTs));
+    let end = Math.ceil(Number(endTs));
+    if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+        return;
+    }
+
+    if (end - start < MIN_ABSOLUTE_WINDOW_SECONDS) {
+        const midpoint = Math.round((start + end) / 2);
+        start = midpoint - Math.floor(MIN_ABSOLUTE_WINDOW_SECONDS / 2);
+        end = start + MIN_ABSOLUTE_WINDOW_SECONDS;
+    }
+
+    currentRangeMode = 'absolute';
+    absoluteStartTs = start;
+    absoluteEndTs = end;
+
+    updateActiveTimeRangeButton();
+    updateRangeUiState();
+    refreshDashboardData(sourceModule);
+}
+
+function returnToLive() {
+    if (currentRangeMode === 'live') {
+        return;
+    }
+
+    currentRangeMode = 'live';
+    absoluteStartTs = null;
+    absoluteEndTs = null;
+
+    updateActiveTimeRangeButton();
+    updateRangeUiState();
+    refreshDashboardData('time');
 }
 
 function setLoadingState(isLoading, message = 'Loading telemetry data...', sourceModule = 'time') {
@@ -194,7 +523,10 @@ function setLoadingState(isLoading, message = 'Loading telemetry data...', sourc
         time: 'timeRangeModuleCard',
         refresh: 'refreshModuleCard'
     };
-    const controls = document.querySelectorAll('.time-range-btn, #bmsIdSelect, #resolutionSelect');
+    const controls = document.querySelectorAll(
+        '.time-range-btn, #bmsIdSelect, #resolutionSelect, '
+        + '#customRangeStart, #customRangeEnd, #customRangeApply, #backToLiveBtn'
+    );
     controls.forEach(control => {
         control.disabled = isLoading;
     });
@@ -308,6 +640,12 @@ function getDataRequestUrl() {
         target_points: targetPoints
     });
 
+    if (currentRangeMode === 'absolute') {
+        // When start/end are present the server ignores `hours`.
+        params.append('start', String(absoluteStartTs));
+        params.append('end', String(absoluteEndTs));
+    }
+
     if (currentBmsId) {
         params.append('bms_id', currentBmsId);
     }
@@ -332,12 +670,20 @@ function sendViewSubscription() {
         return;
     }
 
-    socket.emit('set_view', {
+    const view = {
         hours: currentTimeRange,
         bms_id: currentBmsId,
         resolution: currentResolution,
         target_points: targetPoints
-    });
+    };
+
+    if (currentRangeMode === 'absolute') {
+        // Absolute windows make the server stop pushing telemetry_update to us.
+        view.start = absoluteStartTs;
+        view.end = absoluteEndTs;
+    }
+
+    socket.emit('set_view', view);
 }
 
 // Initialize all charts
@@ -536,6 +882,12 @@ function connectWebSocket() {
     });
 
     socket.on('telemetry_update', function(payload) {
+        if (currentRangeMode === 'absolute') {
+            // The server stops pushing to absolute-mode clients; ignore any
+            // stragglers defensively so a frozen window never gains points.
+            return;
+        }
+
         const point = payload?.point;
         const meta = payload?.meta || {};
         if (!point) {
@@ -871,7 +1223,24 @@ function assignAllChartData(records) {
     });
 }
 
+// Pin the x-axis to the absolute window so the charts show exactly the
+// requested span (and drag-to-zoom pixel→time conversion stays accurate on
+// repeated zooms). Live mode restores auto-fitting to the data.
+function applyXAxisWindow() {
+    Object.values(charts).forEach(chart => {
+        if (currentRangeMode === 'absolute') {
+            chart.options.scales.x.min = absoluteStartTs * 1000;
+            chart.options.scales.x.max = absoluteEndTs * 1000;
+        } else {
+            delete chart.options.scales.x.min;
+            delete chart.options.scales.x.max;
+        }
+    });
+}
+
 function updateChartsWithHistoricalData(data, meta = {}) {
+    applyXAxisWindow();
+
     if (!data || data.length === 0) {
         clearChartData();
         updateResolutionAndPointInfo(meta);
@@ -923,6 +1292,9 @@ function trimDatasetToWindow(dataset, minTimestampMs) {
 }
 
 function trimAllChartsToWindow(timeWindowStart) {
+    if (currentRangeMode === 'absolute') {
+        return;
+    }
     const minTimestampMs = timeWindowStart.getTime();
     Object.values(charts).forEach(chart => {
         chart.data.datasets.forEach(dataset => {
@@ -933,6 +1305,10 @@ function trimAllChartsToWindow(timeWindowStart) {
 
 // Update charts with new real-time data
 function updateChartsWithNewData(data, meta = {}) {
+    if (currentRangeMode === 'absolute') {
+        return;
+    }
+
     const timestamp = new Date(data.timestamp * 1000);
     const now = new Date();
     const timeWindowStart = new Date(now.getTime() - (currentTimeRange * 3600 * 1000));
@@ -1044,7 +1420,16 @@ function updateStatistics(stats) {
 
 function setTimeRange(hours, button) {
     currentTimeRange = hours;
+
+    // Clicking any preset always returns to live mode.
+    if (currentRangeMode === 'absolute') {
+        currentRangeMode = 'live';
+        absoluteStartTs = null;
+        absoluteEndTs = null;
+    }
+
     updateActiveTimeRangeButton();
+    updateRangeUiState();
 
     refreshDashboardData('time');
 }

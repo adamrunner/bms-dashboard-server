@@ -26,6 +26,7 @@ DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
 DEVICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
 FLEET_EXPECTATION_ROUTE_ID = '_fleet'
 MAX_EXPECTATION_GRACE_SECONDS = 30 * 24 * 60 * 60
+MAX_ABSOLUTE_WINDOW_SECONDS = 90 * 24 * 60 * 60
 
 
 def get_app_env() -> str:
@@ -71,8 +72,21 @@ DEFAULT_VIEW_CONFIG = {
     'hours': 0.017,
     'bms_id': None,
     'resolution': 'auto',
-    'target_points': 300
+    'target_points': 300,
+    'start_ts': None,
+    'end_ts': None,
+    'mode': 'live'
 }
+
+
+def _parse_epoch_seconds(value):
+    """Parse an epoch-seconds value (int/float/numeric string) or None."""
+    if value is None:
+        return None
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def normalize_view_config(data=None):
@@ -97,11 +111,28 @@ def normalize_view_config(data=None):
         target_points = DEFAULT_VIEW_CONFIG['target_points']
     target_points = max(50, min(1000, target_points))
 
+    start_ts = _parse_epoch_seconds(payload.get('start'))
+    end_ts = _parse_epoch_seconds(payload.get('end'))
+    if (
+        start_ts is not None
+        and end_ts is not None
+        and end_ts > start_ts
+        and (end_ts - start_ts) <= MAX_ABSOLUTE_WINDOW_SECONDS
+    ):
+        mode = 'absolute'
+    else:
+        start_ts = None
+        end_ts = None
+        mode = 'live'
+
     return {
         'hours': hours,
         'bms_id': bms_id,
         'resolution': resolution,
-        'target_points': target_points
+        'target_points': target_points,
+        'start_ts': start_ts,
+        'end_ts': end_ts,
+        'mode': mode
     }
 
 
@@ -135,6 +166,10 @@ def background_monitor():
                     try:
                         for sid in list(connected_clients):
                             view_cfg = client_view_config.get(sid, DEFAULT_VIEW_CONFIG)
+                            if view_cfg.get('mode') == 'absolute':
+                                # Absolute views are frozen historical
+                                # windows; never stream live points at them.
+                                continue
                             bms_filter = view_cfg.get('bms_id')
 
                             latest_point = get_latest_point_for_view(
@@ -273,20 +308,24 @@ def api_data():
         'hours': request.args.get('hours', default=1, type=float),
         'bms_id': request.args.get('bms_id', default=None, type=str),
         'resolution': request.args.get('resolution', default='auto', type=str),
-        'target_points': request.args.get('target_points', default=300, type=int)
+        'target_points': request.args.get('target_points', default=300, type=int),
+        'start': request.args.get('start', default=None, type=str),
+        'end': request.args.get('end', default=None, type=str)
     })
     
     try:
         print(
             "API: Fetching data for "
             f"{view_config['hours']} hours, BMS ID: {view_config['bms_id']}, "
-            f"resolution: {view_config['resolution']}"
+            f"resolution: {view_config['resolution']}, mode: {view_config['mode']}"
         )
         data, meta = get_telemetry_data_for_view(
             view_config['hours'],
             view_config['bms_id'],
             view_config['resolution'],
-            view_config['target_points']
+            view_config['target_points'],
+            start_ts=view_config['start_ts'],
+            end_ts=view_config['end_ts']
         )
         print(f"API: Returning {len(data)} records (bucket {meta['bucket_seconds']}s)")
         return jsonify({
@@ -752,7 +791,9 @@ def handle_request_data(data):
             view_config['hours'],
             view_config['bms_id'],
             view_config['resolution'],
-            view_config['target_points']
+            view_config['target_points'],
+            start_ts=view_config['start_ts'],
+            end_ts=view_config['end_ts']
         )
         emit('historical_data', {'records': telemetry_data, 'meta': meta})
         
@@ -772,7 +813,9 @@ def handle_set_view(data):
             view_config['hours'],
             view_config['bms_id'],
             view_config['resolution'],
-            view_config['target_points']
+            view_config['target_points'],
+            start_ts=view_config['start_ts'],
+            end_ts=view_config['end_ts']
         )
         emit('view_data', {
             'records': records,

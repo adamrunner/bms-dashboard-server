@@ -74,9 +74,31 @@
                             <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="1" onclick="setTimeRange(1, this)">1 Hour</button>
                             <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="6" onclick="setTimeRange(6, this)">6 Hours</button>
                             <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="24" onclick="setTimeRange(24, this)">24 Hours</button>
+                            <button type="button" class="btn btn-outline-primary time-range-btn" id="customRangeToggle" onclick="toggleCustomRangePanel()">Custom</button>
+                        </div>
+                        <div class="custom-range-panel mt-2" id="customRangePanel" hidden>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-auto">
+                                    <label for="customRangeStart" class="form-label small mb-1">From</label>
+                                    <input type="datetime-local" step="1" class="form-control form-control-sm" id="customRangeStart">
+                                </div>
+                                <div class="col-auto">
+                                    <label for="customRangeEnd" class="form-label small mb-1">To</label>
+                                    <input type="datetime-local" step="1" class="form-control form-control-sm" id="customRangeEnd">
+                                </div>
+                                <div class="col-auto">
+                                    <button type="button" class="btn btn-sm btn-primary" id="customRangeApply" onclick="applyCustomRange()">Apply</button>
+                                </div>
+                            </div>
+                            <div class="small text-danger mt-1" id="customRangeError" hidden></div>
+                        </div>
+                        <div class="d-flex align-items-center gap-2 flex-wrap mt-2">
+                            <span class="small text-muted" id="rangeSummary">Live · last 1 minute</span>
+                            <button type="button" class="btn btn-sm btn-warning back-to-live-btn" id="backToLiveBtn" onclick="returnToLive()" hidden>⏵ Back to live</button>
                         </div>
                         <div class="small text-muted mt-2" id="dataResolutionInfo">Resolution: --</div>
                         <div class="small text-muted" id="dataPointInfo">Points: --</div>
+                        <div class="small text-muted">Tip: drag across any chart to zoom into that window.</div>
                     </div>
                 </div>
             </div>

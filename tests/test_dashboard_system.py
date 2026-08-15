@@ -1324,6 +1324,143 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(status["device_id"], "gw-socket-status")
         self.assertEqual(status["firmware_version"], "9217453")
 
+    def test_absolute_window_returns_only_records_in_window(self):
+        base = int(time.time()) - 7200
+        for offset in (10, 20, 5000):
+            bms_mqtt_logger.insert_telemetry_data(
+                build_payload("bms-window", base + offset)
+            )
+
+        records, meta = database_queries.get_telemetry_data_for_view(
+            1,
+            "bms-window",
+            "auto",
+            300,
+            start_ts=base,
+            end_ts=base + 100
+        )
+
+        self.assertEqual(meta["mode"], "absolute")
+        self.assertEqual(meta["start_ts"], base)
+        self.assertEqual(meta["end_ts"], base + 100)
+        self.assertFalse(meta["is_aggregated"])
+        self.assertEqual(
+            [record["timestamp"] for record in records],
+            [base + 10, base + 20]
+        )
+
+    def test_absolute_window_in_past_excludes_newer_records(self):
+        now = int(time.time())
+        old_ts = now - 7200
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("bms-frozen", old_ts, pack_voltage=12.9)
+        )
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("bms-frozen", now, pack_voltage=13.5)
+        )
+
+        records, meta = database_queries.get_telemetry_data_for_view(
+            24,
+            "bms-frozen",
+            "auto",
+            300,
+            start_ts=old_ts - 30,
+            end_ts=old_ts + 30
+        )
+
+        self.assertEqual(meta["mode"], "absolute")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["timestamp"], old_ts)
+        self.assertEqual(records[0]["pack_voltage_v"], 12.9)
+
+    def test_api_data_absolute_window_returns_windowed_records(self):
+        now = int(time.time())
+        old_ts = now - 7200
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("bms-abs-api", old_ts, pack_voltage=12.7)
+        )
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("bms-abs-api", now, pack_voltage=13.9)
+        )
+
+        client = dashboard_server.app.test_client()
+        response = client.get(
+            f"/api/data?bms_id=bms-abs-api&start={old_ts - 30}&end={old_ts + 30}"
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertEqual(payload["meta"]["mode"], "absolute")
+        self.assertEqual(payload["meta"]["start_ts"], old_ts - 30)
+        self.assertEqual(payload["meta"]["end_ts"], old_ts + 30)
+        self.assertEqual(len(payload["records"]), 1)
+        self.assertEqual(payload["records"][0]["pack_voltage_v"], 12.7)
+
+    def test_normalize_view_config_parses_absolute_window(self):
+        valid = dashboard_server.normalize_view_config(
+            {"start": "1700000000", "end": 1700003600.5}
+        )
+        self.assertEqual(valid["mode"], "absolute")
+        self.assertEqual(valid["start_ts"], 1700000000)
+        self.assertEqual(valid["end_ts"], 1700003600)
+
+        inverted = dashboard_server.normalize_view_config(
+            {"start": 1700003600, "end": 1700000000}
+        )
+        self.assertEqual(inverted["mode"], "live")
+        self.assertIsNone(inverted["start_ts"])
+        self.assertIsNone(inverted["end_ts"])
+
+        junk = dashboard_server.normalize_view_config(
+            {"start": "not-a-time", "end": "soon"}
+        )
+        self.assertEqual(junk["mode"], "live")
+        self.assertIsNone(junk["start_ts"])
+        self.assertIsNone(junk["end_ts"])
+
+        missing = dashboard_server.normalize_view_config({})
+        self.assertEqual(missing["mode"], "live")
+        self.assertIsNone(missing["start_ts"])
+        self.assertIsNone(missing["end_ts"])
+
+        too_wide = dashboard_server.normalize_view_config({
+            "start": 1700000000,
+            "end": 1700000000 + 91 * 24 * 3600
+        })
+        self.assertEqual(too_wide["mode"], "live")
+        self.assertIsNone(too_wide["start_ts"])
+        self.assertIsNone(too_wide["end_ts"])
+
+    def test_wide_absolute_window_is_aggregated_by_duration(self):
+        base = int(time.time()) - 7200
+        bucket_start = base - (base % 60)
+        for offset, voltage in enumerate([13.0, 13.4]):
+            bms_mqtt_logger.insert_telemetry_data(
+                build_payload(
+                    "bms-abs-agg",
+                    bucket_start + offset * 2,
+                    pack_voltage=voltage
+                )
+            )
+
+        # hours=0.017 would render raw for a live view; the one-hour
+        # absolute window duration must drive bucketing instead.
+        records, meta = database_queries.get_telemetry_data_for_view(
+            0.017,
+            "bms-abs-agg",
+            "auto",
+            300,
+            start_ts=bucket_start - 10,
+            end_ts=bucket_start + 3590
+        )
+
+        self.assertEqual(meta["mode"], "absolute")
+        self.assertTrue(meta["is_aggregated"])
+        self.assertEqual(meta["bucket_seconds"], 60)
+        self.assertEqual(meta["point_count"], 1)
+        self.assertEqual(records[0]["sample_count"], 2)
+        self.assertAlmostEqual(records[0]["pack_voltage_v"], 13.2)
+
     def test_background_monitor_emits_selected_device_availability(self):
         now = int(time.time())
         bms_mqtt_logger.insert_telemetry_data(
@@ -1384,6 +1521,85 @@ class DashboardSystemTestCase(unittest.TestCase):
             "gw-socket-availability"
         )
         self.assertTrue(availability["online"])
+
+    def test_background_monitor_skips_absolute_view_clients(self):
+        now = int(time.time())
+        window_start = now - 7200
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-absolute-view", window_start)
+        )
+
+        def run_one_monitor_pass():
+            dashboard_server.last_seen_record_id = None
+            dashboard_server.last_seen_status_id = (
+                database_queries.get_latest_status_record_id()
+            )
+            dashboard_server.last_seen_availability_id = (
+                database_queries.get_latest_availability_record_id()
+            )
+            dashboard_server.monitoring_active = True
+
+            def stop_monitor(_seconds):
+                dashboard_server.monitoring_active = False
+
+            with mock.patch.object(
+                dashboard_server.socketio,
+                "sleep",
+                side_effect=stop_monitor
+            ):
+                dashboard_server.background_monitor()
+
+        def telemetry_messages(received):
+            return [
+                message for message in received
+                if message["name"] == "telemetry_update"
+            ]
+
+        with mock.patch.object(
+            dashboard_server.socketio,
+            "start_background_task",
+            return_value=None
+        ):
+            client = dashboard_server.socketio.test_client(dashboard_server.app)
+            client.get_received()
+            client.emit(
+                "set_view",
+                {
+                    "hours": 1,
+                    "bms_id": "gw-absolute-view",
+                    "resolution": "auto",
+                    "target_points": 300,
+                    "start": window_start - 60,
+                    "end": window_start + 60
+                }
+            )
+            client.get_received()
+
+        # A frozen historical window must never gain live points.
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-absolute-view", now)
+        )
+        run_one_monitor_pass()
+        self.assertEqual(telemetry_messages(client.get_received()), [])
+
+        # Returning to a live view resumes the push stream.
+        client.emit(
+            "set_view",
+            {
+                "hours": 1,
+                "bms_id": "gw-absolute-view",
+                "resolution": "auto",
+                "target_points": 300
+            }
+        )
+        client.get_received()
+
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-absolute-view", now + 1)
+        )
+        run_one_monitor_pass()
+        self.assertEqual(len(telemetry_messages(client.get_received())), 1)
+        client.disconnect()
 
 
 if __name__ == "__main__":

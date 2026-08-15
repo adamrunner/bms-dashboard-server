@@ -175,3 +175,22 @@ body {
     font-size: 0.85rem;
     font-weight: 500;
 }
+
+/* Custom absolute time range panel in the Time Range card */
+.custom-range-panel {
+    border-top: 1px solid #dee2e6;
+    padding-top: 0.5rem;
+}
+
+.custom-range-panel input[type="datetime-local"] {
+    min-width: 13.5rem;
+    font-variant-numeric: tabular-nums;
+}
+
+#rangeSummary {
+    font-variant-numeric: tabular-nums;
+}
+
+.back-to-live-btn {
+    font-weight: 600;
+}
