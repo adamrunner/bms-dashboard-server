@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY bms_mqtt_logger.py .
 COPY bms_schema.sql .
 COPY database_queries.py .
+COPY tools/logger_healthcheck.py ./tools/
 
 # Create data directory for database and ensure proper permissions
 RUN mkdir -p /app/data && chmod 755 /app/data
@@ -34,9 +35,9 @@ RUN groupadd -r bms && useradd -r -g bms bms
 RUN chown -R bms:bms /app
 USER bms
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD python -c "import sqlite3; conn = sqlite3.connect('${DATABASE_PATH}'); conn.execute('SELECT 1'); conn.close()" || exit 1
+# Health check: asserts MQTT connectivity, not database reachability.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python /app/tools/logger_healthcheck.py || exit 1
 
 # Run the MQTT logger
 CMD ["python", "bms_mqtt_logger.py"]

@@ -61,6 +61,10 @@ services:
       MQTT_AVAILABILITY_TOPIC: ${MQTT_AVAILABILITY_TOPIC:-bms/availability/+}
       DATABASE_PATH: /app/data/bms_telemetry.db
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      # Alert when a device has sent nothing for this long. Telemetry normally
+      # arrives every ~10s and the broker keepalive is 120s.
+      TELEMETRY_STALE_AFTER_SECONDS: ${TELEMETRY_STALE_AFTER_SECONDS:-900}
+      MONITOR_INTERVAL_SECONDS: ${MONITOR_INTERVAL_SECONDS:-60}
     volumes:
       - .:/app/data
     networks:
@@ -69,14 +73,10 @@ services:
     depends_on:
       - bms-dashboard
       - mosquitto
+    # Asserts broker connectivity, not database reachability: opening SQLite
+    # succeeds even when the MQTT link is dead.
     healthcheck:
-      test:
-        [
-          "CMD",
-          "python",
-          "-c",
-          "import sqlite3; conn = sqlite3.connect('/app/data/bms_telemetry.db'); conn.execute('SELECT 1'); conn.close()",
-        ]
+      test: ["CMD", "python", "/app/tools/logger_healthcheck.py"]
       interval: 30s
       timeout: 10s
       retries: 3

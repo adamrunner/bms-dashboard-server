@@ -14,6 +14,7 @@ import sys
 import os
 import re
 import time
+import threading
 from datetime import datetime
 import paho.mqtt.client as mqtt
 from database_queries import (
@@ -21,6 +22,8 @@ from database_queries import (
     create_db_connection,
     insert_device_status_checkin,
     insert_device_availability_event,
+    evaluate_telemetry_staleness,
+    DEFAULT_TELEMETRY_STALE_AFTER_SECONDS,
 )
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
@@ -92,6 +95,16 @@ MQTT_AVAILABILITY_TOPIC = os.getenv(
     "bms/availability/+"
 )
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
+
+# The container healthcheck reads this file. It must report MQTT connectivity
+# rather than database reachability: opening SQLite succeeds even when the
+# broker link is dead, which is exactly how a silent logger once looked healthy.
+HEALTH_STATE_PATH = os.getenv("LOGGER_HEALTH_PATH", "/tmp/bms-logger-health.json")
+# How often the monitor thread refreshes the heartbeat and re-checks staleness.
+MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "60"))
+# Bounds on retrying the initial broker connection.
+CONNECT_RETRY_MIN_SECONDS = int(os.getenv("CONNECT_RETRY_MIN_SECONDS", "5"))
+CONNECT_RETRY_MAX_SECONDS = int(os.getenv("CONNECT_RETRY_MAX_SECONDS", "60"))
 
 INSERT_COLUMNS = ', '.join(EXPECTED_COLUMNS)
 INSERT_COLUMNS = f"{INSERT_COLUMNS}, timestamp_valid"
@@ -456,11 +469,69 @@ def insert_availability_data(
     return row_id
 
 
+_health_lock = threading.Lock()
+_health_state = {
+    'mqtt_connected': False,
+    'started_at': int(time.time()),
+    'last_connect_at': None,
+    'last_disconnect_at': None,
+    'last_message_at': None,
+    'updated_at': int(time.time()),
+}
+
+
+def update_health_state(**changes) -> None:
+    """Record logger liveness to disk for the container healthcheck.
+
+    Written atomically so a healthcheck that reads mid-write sees the previous
+    state rather than a truncated file.
+    """
+    with _health_lock:
+        _health_state.update(changes)
+        _health_state['updated_at'] = int(time.time())
+        snapshot = dict(_health_state)
+    try:
+        tmp_path = f"{HEALTH_STATE_PATH}.tmp"
+        with open(tmp_path, 'w', encoding='utf-8') as handle:
+            json.dump(snapshot, handle)
+        os.replace(tmp_path, HEALTH_STATE_PATH)
+    except OSError as e:
+        logger.warning("Could not write health state to %s: %s", HEALTH_STATE_PATH, e)
+
+
+def monitor_loop(client) -> None:
+    """Refresh the heartbeat and evaluate telemetry staleness on a fixed cadence.
+
+    Runs independently of message arrival: a gateway that goes silent produces
+    no callbacks at all, so nothing event-driven can notice its absence.
+    """
+    while True:
+        time.sleep(MONITOR_INTERVAL_SECONDS)
+        try:
+            update_health_state(mqtt_connected=bool(client.is_connected()))
+        except Exception as e:
+            logger.warning("Health state refresh failed: %s", e)
+        try:
+            for entry in evaluate_telemetry_staleness():
+                if entry.get('stale'):
+                    logger.warning(
+                        "Device %s has sent no telemetry for %ss (threshold %ss)",
+                        entry['device_id'],
+                        entry['age_seconds'],
+                        DEFAULT_TELEMETRY_STALE_AFTER_SECONDS,
+                    )
+        except Exception as e:
+            logger.error("Telemetry staleness evaluation failed: %s", e)
+
+
 def on_connect(client, userdata, flags, rc):
     """Callback for when client connects to MQTT broker"""
     logger.debug(f"Connection callback called with rc={rc}")
     if rc == 0:
         logger.info("Connected to MQTT broker")
+        update_health_state(
+            mqtt_connected=True, last_connect_at=int(time.time())
+        )
         result, mid = client.subscribe([
             (MQTT_TOPIC, 0),
             (MQTT_STATUS_TOPIC, 1),
@@ -476,6 +547,7 @@ def on_connect(client, userdata, flags, rc):
         )
     else:
         logger.error(f"Failed to connect to MQTT broker, return code {rc}")
+        update_health_state(mqtt_connected=False)
         
         
 def on_subscribe(client, userdata, mid, granted_qos):
@@ -487,6 +559,7 @@ def on_message(client, userdata, msg):
     """Callback for when a message is received"""
     try:
         payload = msg.payload.decode('utf-8')
+        update_health_state(last_message_at=int(time.time()))
         logger.info(f"Received message on topic {msg.topic}")
         logger.debug(f"Payload: {payload}")
 
@@ -505,7 +578,10 @@ def on_message(client, userdata, msg):
 
 def on_disconnect(client, userdata, rc):
     """Callback for when client disconnects from MQTT broker"""
-    logger.info("Disconnected from MQTT broker")
+    logger.info("Disconnected from MQTT broker (rc=%s)", rc)
+    update_health_state(
+        mqtt_connected=False, last_disconnect_at=int(time.time())
+    )
 
 
 def main():
@@ -525,21 +601,42 @@ def main():
     
     # Enable detailed logging for MQTT client
     client.enable_logger(logger)
-    
-    try:
-        # Connect to MQTT broker
-        logger.info(f"Connecting to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
-        client.connect(MQTT_BROKER, MQTT_PORT, 60)
-        
-        # Start the loop
-        client.loop_forever()
-        
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
-        client.disconnect()
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}")
-        sys.exit(1)
+
+    # Bound the automatic reconnect paho performs after an established session
+    # drops. The retry loop below covers the initial connect, which raises.
+    client.reconnect_delay_set(
+        min_delay=CONNECT_RETRY_MIN_SECONDS, max_delay=CONNECT_RETRY_MAX_SECONDS
+    )
+
+    update_health_state(mqtt_connected=False)
+    monitor = threading.Thread(
+        target=monitor_loop, args=(client,), name='monitor', daemon=True
+    )
+    monitor.start()
+
+    # A broker that is slow to appear is an expected startup condition, not a
+    # fatal one: exiting here left the container crash-looping while Docker
+    # backed off, and DNS for a not-yet-started broker fails exactly this way.
+    retry_delay = CONNECT_RETRY_MIN_SECONDS
+    while True:
+        try:
+            logger.info(f"Connecting to MQTT broker at {MQTT_BROKER}:{MQTT_PORT}")
+            client.connect(MQTT_BROKER, MQTT_PORT, 60)
+            retry_delay = CONNECT_RETRY_MIN_SECONDS
+            # Returns only on an explicit disconnect(); paho reconnects on its own.
+            client.loop_forever()
+            logger.info("MQTT loop ended, reconnecting")
+        except KeyboardInterrupt:
+            logger.info("Shutting down...")
+            client.disconnect()
+            return
+        except Exception as e:
+            update_health_state(mqtt_connected=False)
+            logger.error(
+                "MQTT connection failed (%s), retrying in %ss", e, retry_delay
+            )
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, CONNECT_RETRY_MAX_SECONDS)
 
 
 if __name__ == "__main__":

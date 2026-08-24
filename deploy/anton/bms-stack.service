@@ -1,0 +1,41 @@
+# Brings the BMS telemetry stack up at boot.
+#
+# Docker's own restart policies are not sufficient here. "unless-stopped"
+# records a desired state per container, and after the 2026-08-24 reboot
+# mosquitto stayed down while bms-dashboard came back. The logger then
+# crash-looped for 32 minutes on "Temporary failure in name resolution",
+# because Docker's embedded DNS has no record for a broker container that is
+# not running. This unit makes the whole stack's boot state unconditional.
+#
+# Install:
+#   sudo cp deploy/anton/bms-stack.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now bms-stack.service
+#
+# Verify:
+#   systemctl status bms-stack.service
+#   docker compose ps
+
+[Unit]
+Description=BMS telemetry stack (mosquitto, logger, dashboard)
+Documentation=https://github.com/adamrunner/bms-dashboard-server
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/adamrunner/bms-dashboard-server
+User=adamrunner
+Group=adamrunner
+# adamrunner is a member of the docker group, so this needs no privilege
+# escalation. The stack's .env is read from WorkingDirectory.
+ExecStart=/usr/bin/docker compose up -d --remove-orphans
+# stop, not down: leave volumes and networks intact across a reboot.
+ExecStop=/usr/bin/docker compose stop
+# Image builds on first boot after a change can be slow.
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

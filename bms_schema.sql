@@ -99,7 +99,9 @@ CREATE TABLE IF NOT EXISTS device_alerts (
     device_id TEXT NOT NULL,
     alert_type TEXT NOT NULL,
     severity TEXT NOT NULL,
-    source_status_id INTEGER NOT NULL,
+    -- NULL for alerts that are not derived from a status check-in, such as
+    -- telemetry_stale: a silent device publishes nothing to point at.
+    source_status_id INTEGER,
     dedup_key TEXT NOT NULL UNIQUE,
     details_json TEXT NOT NULL,
     detected_at INTEGER NOT NULL,

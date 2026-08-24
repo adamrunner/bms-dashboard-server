@@ -1601,6 +1601,135 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(len(telemetry_messages(client.get_received())), 1)
         client.disconnect()
 
+    # -- telemetry staleness -------------------------------------------------
+    # Every other alert type is raised from a status check-in. A device that
+    # goes silent sends none, which is how a 17-hour outage went unnoticed on
+    # 2026-08-24. These cover the one evaluator that runs on absence of data.
+
+    def age_last_row(self, seconds: int) -> None:
+        """Backdate the newest row's ingest clock to simulate silence."""
+        conn = database_queries.create_db_connection()
+        try:
+            conn.execute(
+                "UPDATE bms_telemetry SET created_at = datetime('now', ?) "
+                "WHERE id = (SELECT MAX(id) FROM bms_telemetry)",
+                (f"-{seconds} seconds",)
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def stale_alerts(self, device_id: str):
+        return [
+            alert
+            for alert in database_queries.get_device_alerts(device_id, limit=500)
+            if alert['alert_type'] == 'telemetry_stale'
+        ]
+
+    def test_fresh_telemetry_raises_no_staleness_alert(self):
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-fresh", int(time.time()))
+        )
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+        self.assertEqual(self.stale_alerts("gw-fresh"), [])
+
+    def test_silent_device_raises_critical_alert(self):
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-silent", int(time.time()))
+        )
+        self.age_last_row(3600)
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+
+        alerts = self.stale_alerts("gw-silent")
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]['severity'], 'critical')
+        self.assertTrue(alerts[0]['active'])
+        # A silent device has no status check-in to attribute the alert to.
+        self.assertIsNone(alerts[0]['source_status_id'])
+        self.assertEqual(alerts[0]['details']['threshold_seconds'], 900)
+
+    def test_repeated_evaluation_does_not_duplicate_the_alert(self):
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-repeat", int(time.time()))
+        )
+        self.age_last_row(3600)
+        for _ in range(5):
+            database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+        self.assertEqual(len(self.stale_alerts("gw-repeat")), 1)
+
+    def test_resumed_telemetry_resolves_the_alert(self):
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-resume", int(time.time()))
+        )
+        self.age_last_row(3600)
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+        self.assertTrue(self.stale_alerts("gw-resume")[0]['active'])
+
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-resume", int(time.time()))
+        )
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+
+        alerts = self.stale_alerts("gw-resume")
+        self.assertEqual(len(alerts), 1)
+        self.assertFalse(alerts[0]['active'])
+        self.assertIsNotNone(alerts[0]['resolved_at'])
+
+    def test_second_outage_opens_a_separate_alert(self):
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-twice", int(time.time()))
+        )
+        self.age_last_row(3600)
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+
+        # The device comes back, then goes silent again. The recovery row has
+        # its own ingest time, so this is a distinct outage.
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-twice", int(time.time()))
+        )
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+        self.age_last_row(2000)
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+
+        alerts = self.stale_alerts("gw-twice")
+        self.assertEqual(len(alerts), 2)
+        self.assertEqual(sum(1 for alert in alerts if alert['active']), 1)
+
+    def test_recurring_outage_key_reopens_rather_than_vanishing(self):
+        """A resolved alert whose dedup key recurs must re-open, not be dropped.
+
+        ON CONFLICT DO NOTHING would silently discard the second alert, hiding
+        a live outage behind a resolved row.
+        """
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-recur", int(time.time()))
+        )
+        self.age_last_row(3600)
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+        first = self.stale_alerts("gw-recur")[0]
+
+        # Recover, then fall silent again at the very same ingest second.
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-recur", int(time.time()))
+        )
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+        self.assertFalse(self.stale_alerts("gw-recur")[0]['active'])
+        self.age_last_row(3600)
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+
+        alerts = self.stale_alerts("gw-recur")
+        self.assertEqual(len(alerts), 1)
+        self.assertEqual(alerts[0]['id'], first['id'])
+        self.assertTrue(alerts[0]['active'], "outage must be visible again")
+
+    def test_staleness_uses_ingest_clock_not_gateway_clock(self):
+        """A gateway clock far in the past must not read as a stale device."""
+        bms_mqtt_logger.insert_telemetry_data(
+            build_payload("gw-skewed", 1_000_000)
+        )
+        database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
+        self.assertEqual(self.stale_alerts("gw-skewed"), [])
+
 
 if __name__ == "__main__":
     unittest.main()

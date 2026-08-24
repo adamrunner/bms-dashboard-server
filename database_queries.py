@@ -7,6 +7,7 @@ import sqlite3
 import os
 import math
 import json
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple
 
@@ -150,9 +151,64 @@ def ensure_database_schema() -> None:
             WHERE status_seq IS NOT NULL
             """
         )
+        _migrate_nullable_alert_source(conn)
         conn.commit()
     finally:
         conn.close()
+
+
+def _migrate_nullable_alert_source(conn: sqlite3.Connection) -> None:
+    """Drop the NOT NULL on device_alerts.source_status_id.
+
+    Alerts raised from the absence of data (telemetry_stale) have no status
+    check-in to reference. SQLite cannot relax a column constraint in place,
+    so rebuild the table when an older database still carries it.
+    """
+    columns = list(conn.execute("PRAGMA table_info(device_alerts)"))
+    if not columns:
+        return
+    # PRAGMA table_info columns are (cid, name, type, notnull, dflt_value, pk).
+    source_column = next(
+        (row for row in columns if row[1] == 'source_status_id'), None
+    )
+    if source_column is None or not source_column[3]:
+        return
+
+    # executescript() commits any open transaction first, so the rebuild
+    # carries its own so a failure cannot leave the table dropped.
+    conn.executescript(
+        """
+        BEGIN IMMEDIATE;
+        CREATE TABLE device_alerts_migrated (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id TEXT NOT NULL,
+            alert_type TEXT NOT NULL,
+            severity TEXT NOT NULL,
+            source_status_id INTEGER,
+            dedup_key TEXT NOT NULL UNIQUE,
+            details_json TEXT NOT NULL,
+            detected_at INTEGER NOT NULL,
+            acknowledged_at INTEGER,
+            resolved_at INTEGER,
+            FOREIGN KEY(source_status_id) REFERENCES device_status_checkins(id)
+        );
+        INSERT INTO device_alerts_migrated (
+            id, device_id, alert_type, severity, source_status_id,
+            dedup_key, details_json, detected_at, acknowledged_at, resolved_at
+        )
+        SELECT
+            id, device_id, alert_type, severity, source_status_id,
+            dedup_key, details_json, detected_at, acknowledged_at, resolved_at
+        FROM device_alerts;
+        DROP TABLE device_alerts;
+        ALTER TABLE device_alerts_migrated RENAME TO device_alerts;
+        CREATE INDEX IF NOT EXISTS idx_device_alerts_device_detected
+            ON device_alerts(device_id, detected_at DESC, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_device_alerts_active
+            ON device_alerts(device_id, resolved_at, detected_at DESC);
+        COMMIT;
+        """
+    )
 
 
 def validate_database_schema() -> None:
@@ -275,7 +331,7 @@ def _insert_alert(
     device_id: str,
     alert_type: str,
     severity: str,
-    source_status_id: int,
+    source_status_id: Optional[int],
     dedup_key: str,
     details: Dict,
     detected_at: int
@@ -587,6 +643,142 @@ def get_firmware_expectations() -> List[Dict]:
         return records
     finally:
         conn.close()
+
+
+DEFAULT_TELEMETRY_STALE_AFTER_SECONDS = int(
+    os.getenv('TELEMETRY_STALE_AFTER_SECONDS', '900')
+)
+
+
+def get_telemetry_ingest_ages(now: Optional[int] = None) -> List[Dict]:
+    """Report how long ago this server last stored a row for each device.
+
+    Staleness is measured against created_at, the ingest clock, not the
+    gateway-supplied timestamp: a device with an unsynchronized clock must
+    still be judged on when its data actually arrived.
+    """
+    if now is None:
+        now = int(time.time())
+    conn = get_db_connection()
+    try:
+        devices = [
+            row[0]
+            for row in conn.execute(
+                "SELECT DISTINCT bms_id FROM bms_telemetry WHERE bms_id IS NOT NULL"
+            )
+        ]
+        ages = []
+        for device_id in devices:
+            # id is the rowid, so this walks the bms_id index backwards and
+            # stops at the newest row rather than scanning the device.
+            row = conn.execute(
+                """
+                SELECT
+                    CAST(strftime('%s', created_at) AS INTEGER) AS ingested_at,
+                    timestamp AS reported_at
+                FROM bms_telemetry
+                WHERE bms_id = ?
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (device_id,)
+            ).fetchone()
+            if row is None or row['ingested_at'] is None:
+                continue
+            ages.append({
+                'device_id': device_id,
+                'last_ingest_at': row['ingested_at'],
+                'last_reported_at': row['reported_at'],
+                'age_seconds': now - row['ingested_at'],
+            })
+        return ages
+    finally:
+        conn.close()
+
+
+def evaluate_telemetry_staleness(
+    *,
+    now: Optional[int] = None,
+    stale_after_seconds: Optional[int] = None
+) -> List[Dict]:
+    """Raise and clear telemetry_stale alerts from the absence of new rows.
+
+    Every other alert type is driven by a status check-in, which a silent
+    device by definition never sends. This evaluator is the only one that can
+    notice a gateway that simply stopped talking.
+    """
+    if now is None:
+        now = int(time.time())
+    if stale_after_seconds is None:
+        stale_after_seconds = DEFAULT_TELEMETRY_STALE_AFTER_SECONDS
+
+    ages = get_telemetry_ingest_ages(now)
+    conn = create_db_connection()
+    try:
+        for entry in ages:
+            device_id = entry['device_id']
+            entry['stale'] = entry['age_seconds'] > stale_after_seconds
+            if not entry['stale']:
+                conn.execute(
+                    """
+                    UPDATE device_alerts
+                    SET resolved_at = ?
+                    WHERE device_id = ?
+                      AND alert_type = 'telemetry_stale'
+                      AND resolved_at IS NULL
+                    """,
+                    (now, device_id)
+                )
+                continue
+            # One alert per outage, not one per evaluation. An already-active
+            # alert means this outage is reported, so there is nothing to do.
+            already_active = conn.execute(
+                """
+                SELECT 1
+                FROM device_alerts
+                WHERE device_id = ?
+                  AND alert_type = 'telemetry_stale'
+                  AND resolved_at IS NULL
+                LIMIT 1
+                """,
+                (device_id,)
+            ).fetchone()
+            if already_active:
+                continue
+            # The last ingest time is fixed while the device stays silent, so
+            # it names this outage. Re-open on conflict rather than DO NOTHING:
+            # a key that recurs after being resolved must not vanish silently.
+            conn.execute(
+                """
+                INSERT INTO device_alerts (
+                    device_id, alert_type, severity, source_status_id,
+                    dedup_key, details_json, detected_at
+                ) VALUES (?, 'telemetry_stale', 'critical', NULL, ?, ?, ?)
+                ON CONFLICT(dedup_key) DO UPDATE SET
+                    resolved_at = NULL,
+                    acknowledged_at = NULL,
+                    detected_at = excluded.detected_at,
+                    details_json = excluded.details_json
+                """,
+                (
+                    device_id,
+                    f"telemetry_stale:{device_id}:{entry['last_ingest_at']}",
+                    json.dumps(
+                        {
+                            'last_ingest_at': entry['last_ingest_at'],
+                            'last_reported_at': entry['last_reported_at'],
+                            'threshold_seconds': stale_after_seconds,
+                        },
+                        sort_keys=True,
+                        separators=(',', ':')
+                    ),
+                    now,
+                )
+            )
+        conn.commit()
+    finally:
+        conn.close()
+    return ages
 
 
 def get_device_alerts(
