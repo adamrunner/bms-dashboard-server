@@ -166,6 +166,10 @@ Thumbs.db
 *.bak
 *.backup
 backup.db
+
+# Database snapshots and row exports (see AGENTS.md "Database Operations")
+exports/
+backups/
 .claude
 *passwords* 
 

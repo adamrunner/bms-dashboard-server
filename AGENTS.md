@@ -44,15 +44,23 @@ python test_websocket.py
 
 ### Database Operations
 ```bash
-# Create database schema
-sqlite3 bms_telemetry.db < bms_schema.sql
+# Create or upgrade the schema (preferred -- runs migrations too)
+python -c "import database_queries; database_queries.ensure_database_schema()"
 
 # Backup database from Docker
 docker cp bms-dashboard:/app/data/bms_telemetry.db ./backup.db
 
 # Access database directly
 sqlite3 bms_telemetry.db
+
+# Consistent snapshot of a live database (safe under WAL; plain `cp` is not)
+sqlite3 bms_telemetry.db ".backup 'backup.db'"
 ```
+
+Do **not** create databases with `sqlite3 bms_telemetry.db < bms_schema.sql`.
+That applies the schema file but skips the migration pass in
+`ensure_database_schema()`, so indexes over migration-added columns (such as
+`idx_device_status_exact_event`) are never created.
 
 ## Architecture
 
@@ -74,6 +82,53 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 - **SQLite database** with schema defined in `bms_schema.sql`
 - **Query functions** in `database_queries.py` for data retrieval and statistics
 - **29 telemetry fields**: timestamps, voltages, currents, temperatures, state of charge, power metrics
+- **Schema changes follow the rules below** -- they are not optional, and
+  violating them corrupts data silently rather than raising
+
+## Schema Changes
+
+SQLite's `ALTER TABLE ADD COLUMN` can only **append**. A database created fresh
+from `bms_schema.sql` and one upgraded by `ensure_database_schema()` will
+therefore hold identical data in **different physical column orders** if a new
+column is declared mid-table in the schema file but added by `ALTER TABLE` in
+code. This has happened before: `bms_id` and `timestamp_valid` sat at positions
+31/32 in production and 1/3 in `bms_schema.sql`.
+
+The failure mode is silent. `INSERT INTO t VALUES (...)`, `.dump`/restore
+between the two layouts, `.mode insert`, and positional indexing of a
+`SELECT *` row all write values into the wrong columns without erroring --
+SQLite's type affinity accepts a REAL into a TEXT column without complaint.
+
+### Adding a column
+
+1. **Append it to the END** of the `CREATE TABLE` in `bms_schema.sql`. Never
+   insert it mid-table, however much tidier that reads.
+2. Add it to the matching dict in `database_queries.py`
+   (`TELEMETRY_POLICY_COLUMNS`, `DEVICE_STATUS_V2_COLUMNS`) so
+   `ensure_database_schema()` upgrades existing deployments.
+3. Extend `EXPECTED_COLUMN_ORDER` in `tests/test_schema_parity.py`.
+4. Run `python -m pytest tests/test_schema_parity.py`.
+
+`NOT NULL` without a default cannot be added by `ALTER TABLE`. Declare such
+columns nullable and enforce the invariant in the writer, or plan a deliberate
+table rebuild. `bms_id` is nullable in the database for exactly this reason.
+
+Indexes covering a migration-added column must be created in
+`ensure_database_schema()` **after** the ALTER pass, not in `bms_schema.sql` --
+the script runs before the column exists on older databases.
+
+### Always write column-explicit SQL
+
+```sql
+INSERT INTO bms_telemetry (bms_id, timestamp) VALUES (?, ?);  -- safe
+INSERT INTO bms_telemetry VALUES (?, ?);                      -- silently wrong
+```
+
+This applies to ad-hoc exports too. `sqlite3 .mode insert` emits positional
+`VALUES` and is unsafe for anything intended to be restored elsewhere.
+
+`tests/test_schema_parity.py` enforces all of this by building a fresh database
+and a legacy-then-migrated database and asserting the two are identical.
 
 ## Key Configuration
 
