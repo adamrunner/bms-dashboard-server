@@ -1121,6 +1121,12 @@ class DashboardSystemTestCase(unittest.TestCase):
             "auto",
             300
         )
+        latest_point = database_queries.get_latest_point_for_view(
+            0.5,
+            None,
+            "auto",
+            300
+        )
 
         self.assertTrue(meta["is_aggregated"])
         self.assertEqual(meta["bucket_seconds"], 30)
@@ -1128,6 +1134,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertEqual(meta["source_record_count"], 4)
         self.assertEqual(records[0]["sample_count"], 4)
         self.assertAlmostEqual(records[0]["pack_voltage_v"], 13.3)
+        self.assertAlmostEqual(latest_point["cell_voltage_delta_v"], 0.2)
 
     def test_explicit_ten_second_resolution_buckets_rows(self):
         now = int(time.time())
@@ -1160,6 +1167,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertAlmostEqual(records[0]["pack_voltage_v"], 13.0)
         self.assertEqual(latest_point["sample_count"], 2)
         self.assertAlmostEqual(latest_point["pack_voltage_v"], 13.0)
+        self.assertAlmostEqual(latest_point["cell_voltage_delta_v"], 0.2)
 
     def test_aggregated_api_view_reports_unaveraged_latest_reading(self):
         now = int(time.time())
@@ -1246,6 +1254,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         update = telemetry_messages[0]["args"][0]
         self.assertTrue(update["meta"]["is_aggregated"])
         self.assertAlmostEqual(update["point"]["pack_voltage_v"], 40.6 / 3)
+        self.assertAlmostEqual(update["point"]["cell_voltage_delta_v"], 0.2)
         self.assertAlmostEqual(update["latest_reading"]["pack_voltage_v"], 14.0)
         self.assertEqual(update["latest_reading"]["timestamp"], bucket_start + 4)
 

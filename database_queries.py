@@ -1424,6 +1424,7 @@ def get_latest_point_for_view(
                     AVG(cells_v_2) AS cells_v_2,
                     AVG(cells_v_3) AS cells_v_3,
                     AVG(cells_v_4) AS cells_v_4,
+                    AVG(cell_voltage_delta_v) AS cell_voltage_delta_v,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3
@@ -1444,6 +1445,7 @@ def get_latest_point_for_view(
                     AVG(cells_v_2) AS cells_v_2,
                     AVG(cells_v_3) AS cells_v_3,
                     AVG(cells_v_4) AS cells_v_4,
+                    AVG(cell_voltage_delta_v) AS cell_voltage_delta_v,
                     AVG(temps_c_1) AS temps_c_1,
                     AVG(temps_c_2) AS temps_c_2,
                     AVG(temps_c_3) AS temps_c_3
