@@ -1352,8 +1352,7 @@ function updateCurrentValues(data) {
     document.getElementById('currentPower').textContent = (data.power_w || 0).toFixed(1);
 
     const readingTime = data.timestamp ? new Date(data.timestamp * 1000) : new Date();
-    document.getElementById('lastUpdate').textContent =
-        'Last Update: ' + readingTime.toLocaleTimeString();
+    document.getElementById('lastUpdate').textContent = readingTime.toLocaleTimeString();
 }
 
 function loadStatistics() {

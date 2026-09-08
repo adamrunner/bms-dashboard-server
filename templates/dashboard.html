@@ -21,21 +21,20 @@
     
 </head>
 <body>
-    <!-- Connection Status -->
-    <div class="connection-status">
-        <span id="connectionStatus" class="badge status-disconnected">Disconnected</span>
-        <span id="fetchStatus" class="badge fetch-status">OK</span>
-    </div>
-
-    <!-- Navigation -->
-    <nav class="navbar navbar-dark bg-primary">
+    <!-- Navigation / status bar -->
+    <nav class="navbar navbar-dark bg-primary app-navbar sticky-top">
         <div class="container-fluid">
             <span class="navbar-brand mb-0 h1">⚡ BMS Telemetry Dashboard</span>
-            <div class="d-flex align-items-center gap-3">
+            <div class="navbar-status">
                 <a class="btn btn-sm btn-outline-light" href="/status">
                     Fleet Status
                 </a>
-                <span id="lastUpdate" class="text-light">Loading...</span>
+                <span class="text-light last-update">
+                    <span class="last-update-label">Last Update:</span>
+                    <span id="lastUpdate">--:--:--</span>
+                </span>
+                <span id="connectionStatus" class="badge status-disconnected">Disconnected</span>
+                <span id="fetchStatus" class="badge fetch-status">OK</span>
             </div>
         </div>
     </nav>
@@ -67,7 +66,7 @@
                     </div>
                     <div class="card-body">
                         <h5 class="card-title">Time Range</h5>
-                        <div class="btn-group" role="group">
+                        <div class="time-range-group" role="group" aria-label="Time range">
                             <button type="button" class="btn btn-outline-primary time-range-btn active" data-hours="0.017" onclick="setTimeRange(0.017, this)">1 Min</button>
                             <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="0.167" onclick="setTimeRange(0.167, this)">10 Min</button>
                             <button type="button" class="btn btn-outline-primary time-range-btn" data-hours="0.5" onclick="setTimeRange(0.5, this)">30 Min</button>
