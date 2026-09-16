@@ -32,6 +32,10 @@ docker-compose down -v && docker-compose up -d
 # Install Python dependencies
 pip install -r requirements.txt
 
+# Add the test and deploy tooling (pytest; not in requirements.txt, which is
+# what the production images install). eventlet needs Python 3.10 or 3.11.
+pip install -r requirements-dev.txt
+
 # Run dashboard server locally
 python dashboard_server.py
 

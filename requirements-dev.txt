@@ -1,0 +1,6 @@
+# Everything needed to run the test suite and deploy/anton/deploy.sh.
+# The tests import dashboard_server and bms_mqtt_logger, so the runtime
+# dependencies are required as well as pytest itself.
+-r requirements.txt
+
+pytest==9.1.1

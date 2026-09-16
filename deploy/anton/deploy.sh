@@ -76,7 +76,7 @@ if (( run_tests )); then
         python_bin=".venv/bin/python"
     fi
     if ! "$python_bin" -c "import pytest" 2>/dev/null; then
-        fail "pytest is not installed for $python_bin. Install it with '$python_bin -m pip install pytest', or pass --skip-tests."
+        fail "pytest is not installed for $python_bin. Install it with '$python_bin -m pip install -r requirements-dev.txt', or pass --skip-tests."
     fi
     "$python_bin" -m pytest tests/ -q || fail "tests failed."
 else

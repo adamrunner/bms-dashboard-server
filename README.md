@@ -174,10 +174,20 @@ The normalized database column order is:
 # Install dependencies
 pip install -r requirements.txt
 
+# Or, to run the tests and deploy/anton/deploy.sh as well
+pip install -r requirements-dev.txt
+
 # Run services locally
 python dashboard_server.py
 python bms_mqtt_logger.py
+
+# Run the tests
+python -m pytest tests/
 ```
+
+`eventlet==0.33.3` does not work on Python 3.12 or newer; use 3.10 or 3.11 for
+a local virtualenv. `deploy/anton/deploy.sh` prefers `.venv/bin/python` when a
+virtualenv is present at the repository root, and falls back to `python3`.
 
 ### Docker Commands
 
