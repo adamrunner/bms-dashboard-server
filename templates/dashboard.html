@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="{{ url_for('static', filename='js/theme.js') }}"></script>
     <title>BMS Telemetry Dashboard</title>
     
     <!-- Favicon -->
@@ -35,6 +36,7 @@
                 </span>
                 <span id="connectionStatus" class="badge status-disconnected">Disconnected</span>
                 <span id="fetchStatus" class="badge fetch-status">OK</span>
+                {% include "theme_toggle.html" %}
             </div>
         </div>
     </nav>

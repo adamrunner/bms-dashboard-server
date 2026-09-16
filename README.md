@@ -212,6 +212,13 @@ When running in debug mode:
 - Code changes will trigger server restart
 - Debug logging is enabled
 
+Use the debug flag whenever you are editing templates. Without it, Jinja
+compiles each template once and caches it for the life of the process, so edits
+to anything under `templates/` -- including partials pulled in with `{% include %}`,
+such as `theme_toggle.html` -- keep serving the old markup until the server is
+restarted. Files under `static/` are re-read from disk per request, so CSS and
+JS edits only need a browser reload.
+
 ### Database Operations
 
 ```bash

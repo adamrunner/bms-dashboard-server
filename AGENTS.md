@@ -35,6 +35,11 @@ pip install -r requirements.txt
 # Run dashboard server locally
 python dashboard_server.py
 
+# Run it with template auto-reload (use this while editing anything in
+# templates/ -- without --debug, Jinja caches compiled templates and edits
+# are not served until the process restarts)
+python start_dashboard.py --debug
+
 # Run MQTT logger locally (requires MQTT broker)
 python bms_mqtt_logger.py
 

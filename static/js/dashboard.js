@@ -249,6 +249,7 @@ function cancelAllChartDrags() {
 // Initialize dashboard
 document.addEventListener('DOMContentLoaded', function() {
     initializeCharts();
+    applyChartTheme();
     Object.values(charts).forEach(setupDragToZoom);
     document.addEventListener('keydown', event => {
         if (event.key === 'Escape') {
@@ -850,6 +851,38 @@ function initializeCharts() {
         }
     });
 }
+
+function applyChartTheme() {
+    const styles = getComputedStyle(document.documentElement);
+    const text = styles.getPropertyValue('--app-chart-text').trim();
+    const grid = styles.getPropertyValue('--app-chart-grid').trim();
+    const dark = document.documentElement.dataset.bsTheme === 'dark';
+    const darkSeriesColors = {
+        '#007bff': '#69aaff', '#28a745': '#60d48b', '#dc3545': '#ff7885',
+        '#6610f2': '#b493ff', '#6f42c1': '#b493ff', '#17a2b8': '#53c9dd'
+    };
+    Object.values(charts).forEach(chart => {
+        chart.options.color = text;
+        chart.options.plugins.legend.labels = {
+            ...chart.options.plugins.legend.labels, color: text
+        };
+        Object.values(chart.options.scales).forEach(scale => {
+            scale.ticks = { ...scale.ticks, color: text };
+            scale.title = { ...scale.title, color: text };
+            scale.grid = { ...scale.grid, color: grid };
+            scale.border = { ...scale.border, color: grid };
+        });
+        chart.data.datasets.forEach(dataset => {
+            dataset.lightBorderColor ??= dataset.borderColor;
+            dataset.borderColor = dark
+                ? (darkSeriesColors[dataset.lightBorderColor] || dataset.lightBorderColor)
+                : dataset.lightBorderColor;
+        });
+        chart.update('none');
+    });
+}
+
+document.addEventListener('themechange', applyChartTheme);
 
 // Connect to WebSocket
 function connectWebSocket() {
