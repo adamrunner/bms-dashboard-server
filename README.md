@@ -229,6 +229,42 @@ docker cp bms-dashboard:/app/data/bms_telemetry.db ./backup.db
 sqlite3 bms_telemetry.db
 ```
 
+## Deployment
+
+Production runs on `anton`, which tracks the `dev` branch at
+`~/bms-dashboard-server`. There is no deploy script: `deploy/anton/` holds
+one-time setup helpers (MQTTS certificates, credentials, the `bms-stack.service`
+boot unit), not a release path. Deploying is a pull, a rebuild and a
+recreate, run over SSH:
+
+```bash
+ssh anton
+cd ~/bms-dashboard-server
+git pull --ff-only origin dev
+docker compose build bms-dashboard
+docker compose up -d bms-dashboard
+```
+
+The build step is not optional. `Dockerfile.dashboard` copies `templates/` and
+`static/` into the image, so a pull on its own changes nothing that is running.
+
+Name only the service you changed. Recreating `bms-dashboard` alone leaves
+`bms-logger` and `mosquitto` untouched, which keeps the live MQTT session and
+its subscriptions intact; a bare `docker compose up -d` risks restarting the
+broker for a change that never touched it. A change to `bms_mqtt_logger.py` or
+the broker config is the case for rebuilding those services instead.
+
+Verify before walking away:
+
+```bash
+docker compose ps                               # all three healthy
+curl -s http://localhost:5000/api/health        # latest_timestamp within seconds of now
+```
+
+A `latest_timestamp` that is minutes stale means the logger lost the broker,
+not that the deployment failed. The dashboard is reachable from a workstation
+at http://anton:5000 over Tailscale.
+
 ## Monitoring
 
 All services include health checks and logging:
