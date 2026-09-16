@@ -87,22 +87,28 @@ ssh -o BatchMode=yes -o ConnectTimeout=10 "$host" true \
     || fail "cannot reach $host over SSH."
 
 # --- Snapshot the database ------------------------------------------------
-# Plain cp is not safe against a live SQLite database; .backup is.
+# Plain cp is not safe against a live SQLite database; .backup is. The snapshot
+# runs inside the dashboard container, as cleanup-stale-devices.sh does:
+# backups/ is a bind mount owned by the container's user, and the SSH account
+# cannot write to it.
 
 say "Snapshotting the database on $host"
-snapshot="$(ssh -o BatchMode=yes "$host" "APP_DIR='$app_dir' KEEP='$keep_snapshots' bash -s" <<'REMOTE'
+snapshot="$(ssh -o BatchMode=yes "$host" "APP_DIR='$app_dir' KEEP='$keep_snapshots' CONTAINER='bms-dashboard' bash -s" <<'REMOTE'
 set -Eeuo pipefail
 cd "$APP_DIR"
-mkdir -p backups
 stamp="$(date -u +%Y%m%dT%H%M%SZ)"
-path="backups/bms_telemetry-pre-deploy-${stamp}.db"
-sqlite3 bms_telemetry.db ".backup '${path}'"
-check="$(sqlite3 "$path" 'PRAGMA quick_check;')"
+name="bms_telemetry-pre-deploy-${stamp}.db"
+docker exec "$CONTAINER" mkdir -p /app/data/backups
+docker exec "$CONTAINER" sqlite3 /app/data/bms_telemetry.db ".backup '/app/data/backups/${name}'"
+check="$(docker exec "$CONTAINER" sqlite3 "/app/data/backups/${name}" 'PRAGMA quick_check;')"
 [[ "$check" == "ok" ]] || { echo "snapshot failed quick_check: $check" >&2; exit 1; }
 # Keep only the newest pre-deploy snapshots. Snapshots labelled by hand for a
-# migration or a cleanup are left alone.
-ls -1t backups/bms_telemetry-pre-deploy-*.db 2>/dev/null | tail -n +$((KEEP + 1)) | xargs -r rm -- || true
-echo "$path"
+# migration or a cleanup do not match the glob and are left alone.
+stale="$(docker exec "$CONTAINER" sh -c 'ls -1t /app/data/backups/bms_telemetry-pre-deploy-*.db 2>/dev/null' | tail -n +$((KEEP + 1)) || true)"
+if [[ -n "$stale" ]]; then
+    echo "$stale" | while read -r old; do docker exec "$CONTAINER" rm -f "$old"; done
+fi
+echo "backups/${name}"
 REMOTE
 )" || fail "could not snapshot the database. Nothing has been changed on $host."
 echo "    $snapshot"
