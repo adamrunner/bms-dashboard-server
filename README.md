@@ -232,13 +232,36 @@ sqlite3 bms_telemetry.db
 ## Deployment
 
 Production runs on `anton`, which tracks the `dev` branch at
-`~/bms-dashboard-server`. There is no deploy script: `deploy/anton/` holds
-one-time setup helpers (MQTTS certificates, credentials, the `bms-stack.service`
-boot unit), not a release path. Deploying is a pull, a rebuild and a
-recreate, run over SSH:
+`~/bms-dashboard-server`. Deploy from a workstation:
 
 ```bash
-ssh anton
+deploy/anton/deploy.sh                          # bms-dashboard to anton
+deploy/anton/deploy.sh --service bms-logger     # after a logger change
+deploy/anton/deploy.sh --host anton.local       # LAN instead of Tailscale
+```
+
+The script refuses to deploy a dirty working tree or a HEAD that has not been
+pushed, so the tests it runs describe the same commit the host will check out.
+It then snapshots the live database, pulls, rebuilds, recreates only the named
+service, and waits for that service to report healthy before calling the deploy
+done. If it does not come up, the script prints recent logs, the rollback
+command with the previous commit already filled in, and the path to the
+snapshot. `deploy/anton/deploy.sh --help` lists the flags and environment
+overrides.
+
+The snapshot is the reason the script exists. Both services call
+`ensure_database_schema()` on startup, so every deploy runs a migration pass
+against the live database -- the one step that checking out the previous commit
+does not undo. Snapshots are written to `backups/` on the host with
+`sqlite3 .backup`, which is safe against a running database where `cp` is not;
+the ten most recent are kept, and snapshots you labelled by hand are never
+pruned.
+
+### Deploying by hand
+
+The same three commands, for when you are already on the host:
+
+```bash
 cd ~/bms-dashboard-server
 git pull --ff-only origin dev
 docker compose build bms-dashboard
@@ -251,8 +274,7 @@ The build step is not optional. `Dockerfile.dashboard` copies `templates/` and
 Name only the service you changed. Recreating `bms-dashboard` alone leaves
 `bms-logger` and `mosquitto` untouched, which keeps the live MQTT session and
 its subscriptions intact; a bare `docker compose up -d` risks restarting the
-broker for a change that never touched it. A change to `bms_mqtt_logger.py` or
-the broker config is the case for rebuilding those services instead.
+broker for a change that never touched it.
 
 Verify before walking away:
 
