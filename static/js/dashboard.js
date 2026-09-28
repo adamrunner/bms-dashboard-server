@@ -23,7 +23,7 @@ const DRAG_SELECT_MIN_PIXELS = 10;
 const CHART_DATA_FIELDS = {
     voltage: ['pack_voltage_v'],
     current: ['pack_current_a'],
-    soc: ['state_of_charge_pct'],
+    soc: ['state_of_charge_pct', 'corrected_soc_pct'],
     cell: ['cells_v_1', 'cells_v_2', 'cells_v_3', 'cells_v_4'],
     temp: ['temps_c_1', 'temps_c_2', 'temps_c_3'],
     cellDelta: ['cell_voltage_delta_v'],
@@ -740,9 +740,17 @@ function initializeCharts() {
         ...chartConfig,
         data: {
             datasets: [{
-                label: 'State of Charge (%)',
+                label: 'BMS SoC (%)',
                 borderColor: '#ffc107',
                 backgroundColor: 'rgba(255,193,7,0.1)',
+                data: []
+            }, {
+                // Dashed so it reads as derived, not measured.
+                label: 'Estimated SoC, drift-corrected (%)',
+                borderColor: '#0d9488',
+                backgroundColor: 'rgba(13,148,136,0.1)',
+                borderDash: [6, 4],
+                fill: false,
                 data: []
             }]
         },
@@ -1382,10 +1390,33 @@ function updateCurrentValues(data) {
     document.getElementById('currentVoltage').textContent = (data.pack_voltage_v || 0).toFixed(2);
     document.getElementById('currentCurrent').textContent = (data.pack_current_a || 0).toFixed(2);
     document.getElementById('currentSoC').textContent = (data.state_of_charge_pct || 0).toFixed(1);
+    updateCorrectedSoc(data.corrected_soc);
     document.getElementById('currentPower').textContent = (data.power_w || 0).toFixed(1);
 
     const readingTime = data.timestamp ? new Date(data.timestamp * 1000) : new Date();
     document.getElementById('lastUpdate').textContent = readingTime.toLocaleTimeString();
+}
+
+function updateCorrectedSoc(estimate) {
+    const value = document.getElementById('correctedSoCValue');
+    const age = document.getElementById('correctedSoCAge');
+    if (!estimate || estimate.corrected_soc_pct === null || estimate.corrected_soc_pct === undefined) {
+        value.textContent = '--';
+        age.textContent = estimate ? '(no full charge on record)' : '';
+        return;
+    }
+    value.textContent = estimate.corrected_soc_pct.toFixed(1) + '%';
+    const hours = estimate.hours_since_full;
+    let ageText = '';
+    if (hours !== null && hours !== undefined) {
+        ageText = hours < 48
+            ? `· ${hours.toFixed(1)} h since full`
+            : `· ${(hours / 24).toFixed(1)} d since full`;
+    }
+    if (estimate.unmeasured_gap_hours > 0) {
+        ageText += ` · ${estimate.unmeasured_gap_hours.toFixed(1)} h unmeasured`;
+    }
+    age.textContent = ageText;
 }
 
 function loadStatistics() {

@@ -95,6 +95,10 @@ services:
       FLASK_PORT: 5000
       FLASK_DEBUG: ${FLASK_DEBUG:-false}
       FLASK_SECRET_KEY: ${FLASK_SECRET_KEY:-}
+      # Drift-corrected SOC (soc_estimate.py). The drain is load the BMS never
+      # measures -- the gateway wired upstream of it. Set 0 once it is rewired.
+      SOC_UNMEASURED_DRAIN_A: ${SOC_UNMEASURED_DRAIN_A:-0.20}
+      SOC_CAPACITY_AH: ${SOC_CAPACITY_AH:-100}
     ports:
       - "${DASHBOARD_PORT:-5000}:5000"
     volumes:

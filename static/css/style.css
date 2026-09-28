@@ -69,6 +69,17 @@
     font-size: 0.9em;
 }
 
+.soc-estimate {
+    color: var(--app-muted);
+    font-size: 0.85em;
+    margin-top: 0.25rem;
+}
+
+.soc-estimate #correctedSoCValue {
+    color: var(--app-value);
+    font-weight: 600;
+}
+
 .device-status-card {
     border-left: 0.3rem solid #0d6efd;
 }

@@ -153,7 +153,12 @@
             <div class="col-md-3">
                 <div class="metric-card text-center">
                     <div class="metric-value" id="currentSoC">--</div>
-                    <div class="metric-label">State of Charge (%)</div>
+                    <div class="metric-label">BMS State of Charge (%)</div>
+                    <div class="soc-estimate" id="correctedSoC"
+                         title="Estimate, not a BMS reading: 100% at the last true full charge (&ge;14.4 V at tail current), minus measured net discharge and the load the BMS cannot see, capped by low cell voltage.">
+                        Estimated: <span id="correctedSoCValue">--</span>
+                        <span id="correctedSoCAge"></span>
+                    </div>
                 </div>
             </div>
             <div class="col-md-3">

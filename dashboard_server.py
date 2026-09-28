@@ -21,6 +21,7 @@ from database_queries import (
     acknowledge_device_alert, get_firmware_expectations,
     set_firmware_expectation, delete_firmware_expectation
 )
+from soc_estimate import annotate_records, get_latest_corrected_soc
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
 DEVICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
@@ -136,6 +137,50 @@ def normalize_view_config(data=None):
     }
 
 
+def attach_corrected_soc(reading, bms_id):
+    """Add the drift-corrected SOC estimate to a latest-reading dict.
+
+    The estimate is best-effort: a failure here must never take down the
+    reading it decorates.
+    """
+    if not reading:
+        return reading
+    estimate = None
+    if bms_id:
+        try:
+            estimate = get_latest_corrected_soc(bms_id)
+        except Exception as soc_error:
+            print(f"Corrected SOC estimate failed for {bms_id}: {soc_error}")
+    reading['corrected_soc'] = estimate
+    reading['corrected_soc_pct'] = (
+        estimate['corrected_soc_pct'] if estimate else None
+    )
+    return reading
+
+
+def get_view_records(view_config):
+    """Fetch view records and add corrected_soc_pct to each point."""
+    records, meta = get_telemetry_data_for_view(
+        view_config['hours'],
+        view_config['bms_id'],
+        view_config['resolution'],
+        view_config['target_points'],
+        start_ts=view_config['start_ts'],
+        end_ts=view_config['end_ts']
+    )
+    try:
+        annotate_records(
+            records,
+            view_config['bms_id'],
+            meta['bucket_seconds'] if meta['is_aggregated'] else None
+        )
+    except Exception as soc_error:
+        print(f"Corrected SOC series failed: {soc_error}")
+        for record in records:
+            record['corrected_soc_pct'] = None
+    return records, meta
+
+
 def background_monitor():
     """Background thread to monitor database for new data"""
     global last_seen_record_id, last_seen_status_id, last_seen_availability_id
@@ -186,13 +231,21 @@ def background_monitor():
                                 view_cfg['resolution'],
                                 view_cfg['target_points']
                             )
+                            latest_reading = attach_corrected_soc(
+                                get_latest_dashboard_point(bms_filter),
+                                bms_filter
+                            )
+                            # The estimate is a running value, so the newest
+                            # one stands in for the bucket's mean.
+                            latest_point['corrected_soc_pct'] = (
+                                latest_reading.get('corrected_soc_pct')
+                                if latest_reading else None
+                            )
                             socketio.server.emit('telemetry_update', {
                                 'point': latest_point,
                                 # Metric cards always show the newest raw
                                 # reading, never a bucket average.
-                                'latest_reading': get_latest_dashboard_point(
-                                    bms_filter
-                                ),
+                                'latest_reading': latest_reading,
                                 'meta': {
                                     'bucket_seconds': bucket_seconds,
                                     'is_aggregated': should_aggregate_view(
@@ -319,18 +372,14 @@ def api_data():
             f"{view_config['hours']} hours, BMS ID: {view_config['bms_id']}, "
             f"resolution: {view_config['resolution']}, mode: {view_config['mode']}"
         )
-        data, meta = get_telemetry_data_for_view(
-            view_config['hours'],
-            view_config['bms_id'],
-            view_config['resolution'],
-            view_config['target_points'],
-            start_ts=view_config['start_ts'],
-            end_ts=view_config['end_ts']
-        )
+        data, meta = get_view_records(view_config)
         print(f"API: Returning {len(data)} records (bucket {meta['bucket_seconds']}s)")
         return jsonify({
             'records': data,
-            'latest_reading': get_latest_dashboard_point(view_config['bms_id']),
+            'latest_reading': attach_corrected_soc(
+                get_latest_dashboard_point(view_config['bms_id']),
+                view_config['bms_id']
+            ),
             'meta': meta
         })
     except Exception as e:
@@ -344,6 +393,8 @@ def api_latest():
     bms_id = request.args.get('bms_id', default=None, type=str)
     try:
         data = get_latest_reading(bms_id)
+        if data:
+            attach_corrected_soc(data, data.get('bms_id'))
         return jsonify(data if data else {})
     except Exception as e:
         print(f"Error fetching latest data: {e}")
@@ -787,14 +838,7 @@ def handle_request_data(data):
     """Handle client request for specific data"""
     try:
         view_config = normalize_view_config(data)
-        telemetry_data, meta = get_telemetry_data_for_view(
-            view_config['hours'],
-            view_config['bms_id'],
-            view_config['resolution'],
-            view_config['target_points'],
-            start_ts=view_config['start_ts'],
-            end_ts=view_config['end_ts']
-        )
+        telemetry_data, meta = get_view_records(view_config)
         emit('historical_data', {'records': telemetry_data, 'meta': meta})
         
     except Exception as e:
@@ -809,17 +853,13 @@ def handle_set_view(data):
         sid = request.sid
         view_config = normalize_view_config(data)
         client_view_config[sid] = view_config
-        records, meta = get_telemetry_data_for_view(
-            view_config['hours'],
-            view_config['bms_id'],
-            view_config['resolution'],
-            view_config['target_points'],
-            start_ts=view_config['start_ts'],
-            end_ts=view_config['end_ts']
-        )
+        records, meta = get_view_records(view_config)
         emit('view_data', {
             'records': records,
-            'latest_reading': get_latest_dashboard_point(view_config['bms_id']),
+            'latest_reading': attach_corrected_soc(
+                get_latest_dashboard_point(view_config['bms_id']),
+                view_config['bms_id']
+            ),
             'meta': meta
         })
     except Exception as e:
