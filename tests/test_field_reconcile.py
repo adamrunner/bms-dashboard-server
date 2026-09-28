@@ -105,6 +105,50 @@ class FieldReconcileTests(unittest.TestCase):
             report["derived_counts"]["production_unique_rows"], 26680
         )
 
+    def test_duplicate_report_separates_copies_from_same_second_samples(self):
+        import tempfile
+
+        import database_queries
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "report.db"
+            original = database_queries.DATABASE_PATH
+            database_queries.DATABASE_PATH = str(db_path)
+            try:
+                database_queries.ensure_database_schema()
+                conn = database_queries.create_db_connection()
+                insert = (
+                    "INSERT INTO bms_telemetry (bms_id, timestamp, elapsed_seconds, "
+                    "pack_voltage_v, delivery_boot_id, delivery_sequence) "
+                    "VALUES (?, ?, ?, 13.2, ?, ?)"
+                )
+                rows = [
+                    ("gw-a", 1000, 10, None, None),
+                    ("gw-a", 1000, 10, None, None),  # redelivered copy
+                    ("gw-a", 1000, 3, None, None),   # distinct sample, same second
+                    ("gw-a", 1010, 20, "b1", 1),
+                    ("gw-b", 1010, 20, None, None),  # other device, ignored
+                ]
+                conn.executemany(insert, rows)
+                conn.commit()
+                conn.close()
+            finally:
+                database_queries.DATABASE_PATH = original
+
+            report = field_reconcile.duplicate_report(db_path, "gw-a")
+
+        self.assertEqual(report["totals"], {
+            "db_rows": 4,
+            "timestamp_duplicate_excess": 2,
+            "content_duplicate_excess": 1,
+        })
+        self.assertEqual(report["identified_deliveries"], [{
+            "delivery_boot_id": "b1",
+            "rows": 1,
+            "distinct_sequences": 1,
+            "duplicate_excess": 0,
+        }])
+
 
 if __name__ == "__main__":
     unittest.main()

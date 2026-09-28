@@ -92,6 +92,8 @@ DEVICE_STATUS_V2_COLUMNS = {
 }
 TELEMETRY_POLICY_COLUMNS = {
     'timestamp_valid': 'BOOLEAN NOT NULL DEFAULT 1',
+    'delivery_boot_id': 'TEXT',
+    'delivery_sequence': 'INTEGER',
 }
 
 
@@ -142,6 +144,15 @@ def ensure_database_schema() -> None:
             UPDATE bms_telemetry
             SET timestamp_valid = 0
             WHERE timestamp <= 0 AND timestamp_valid != 0
+            """
+        )
+        # One row per identified delivery. Partial, so legacy CSV rows (NULL
+        # identity) and all historical data are untouched by it.
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_telemetry_delivery_identity
+            ON bms_telemetry(bms_id, delivery_boot_id, delivery_sequence)
+            WHERE delivery_boot_id IS NOT NULL AND delivery_sequence IS NOT NULL
             """
         )
         conn.execute(

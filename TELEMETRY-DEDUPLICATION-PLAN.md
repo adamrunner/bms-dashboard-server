@@ -1,8 +1,88 @@
 # Telemetry Duplication Plan
 
-Status: `proposed`
+Status: backend `implemented, not deployed` (2026-09-28); firmware `not started`
 
-Evidence date: 2026-08-17
+Evidence date: 2026-08-17 (re-measured 2026-09-28)
+
+## Status as of 2026-09-28
+
+Duplicates persist at 4.5-8.5% of rows per boot (boot `a9635d23`: 62,751 rows,
+60,024 distinct timestamps). The backend half is built; the firmware half has
+not started. The split:
+
+### Backend (this repository) -- done, awaiting deploy
+
+1. **Schema.** `bms_telemetry` gains nullable `delivery_boot_id TEXT` and
+   `delivery_sequence INTEGER`, appended at the end per CLAUDE.md, plus a
+   partial unique index `idx_telemetry_delivery_identity` on
+   `(bms_id, delivery_boot_id, delivery_sequence)` created after the ALTER
+   pass. Migrating a copy of the 2026-09-28 Anton database (689,124 rows) took
+   0.3 s, left every row and id intact, and passed `PRAGMA quick_check`. The
+   index is partial, so historical rows (all NULL identity) are untouched.
+2. **Envelope ingest.** The logger accepts the schema-v2 envelope specified in
+   `esp32-sim7670g/docs/FIELD_RELIABILITY_REMEDIATION_PLAN.md`, validated the
+   same way `tools/field_reconcile.py` parses it, plus: topic and envelope
+   device IDs must match, `boot_id` is 1-64 `[A-Za-z0-9_-]`, `sequence` is an
+   unsigned 32-bit integer, the payload is at most 8 KiB, and `csv` holds
+   exactly one row. Identified rows insert with `ON CONFLICT ... DO NOTHING`.
+3. **Legacy guard (Option C, narrowed).** A legacy CSV row identical in *every*
+   value column to a stored row is dropped. This answers the objections below:
+   a pack at rest repeats its values but never its capture timestamp together
+   with its `elapsed_seconds` uptime counter, and a second distinct sample in
+   the same second differs in `elapsed_seconds` and is kept. Measured against
+   the Anton copy, every duplicate since 2026-07-29 is an exact copy (31,625
+   rows), so the guard alone would have removed all of them. The only
+   same-second rows with differing content (1,335 timestamps) are from Jul
+   27-28 commissioning, where two captures claim one wall-clock second with
+   different uptimes; they are kept. `TELEMETRY_CONTENT_DEDUP=0` disables it.
+   It is still not a substitute for identity: it cannot suppress a copy whose
+   CSV was regenerated with different formatting.
+4. **Metrics.** Suppressions are logged and counted in the logger health file
+   (`telemetry_identified_duplicates_suppressed`,
+   `telemetry_content_duplicates_suppressed`, `telemetry_rows_inserted`,
+   `telemetry_rows_rejected`).
+5. **Verification.** `tools/field_reconcile.py --duplicates-db COPY.db
+   [--device ID]` reports per-boot `timestamp_duplicate_excess` (the
+   `COUNT(*) - COUNT(DISTINCT timestamp)` check), `content_duplicate_excess`,
+   and excess per identified `delivery_boot_id`. Run it on a `.backup` copy,
+   never the live file.
+
+### Firmware (esp32-sim7670g) -- required
+
+- Generate `boot_id` once per boot (the status `boot_id` already exists; reuse
+  it so telemetry and status boots join).
+- Assign `sequence` once per captured row, monotonic within the boot, **before
+  the first publish attempt**. Never allocate a new one on retry, reconnect, or
+  PUBACK timeout.
+- **Spool replay reuses the original identity.** Write the exact envelope (or
+  the row plus its `boot_id`/`sequence`) to the spool at capture time and replay
+  it byte-for-byte. A replay after reboot therefore carries the *old* boot's
+  `boot_id`, which is correct: identity names the sample, not the delivery
+  attempt. This matters more once LOW_POWER_PLAN batching makes the spool the
+  normal delivery path.
+- Publish on `bms/telemetry/<device_id>` with `captured_at` equal to the CSV
+  timestamp and `timestamp_valid` equal to `captured_at > 0`; the backend
+  rejects envelopes where these disagree.
+- Keep the daily SD CSV unchanged.
+- Expose live vs replay publish counts so reconciliation can compare them.
+
+### Historical cleanup -- separate, explicit, not done
+
+Existing duplicates stay until this is approved on its own:
+
+1. `docker exec bms-dashboard sqlite3 /app/data/bms_telemetry.db ".backup
+   '/app/data/backups/bms_telemetry-pre-dedup-<stamp>.db'"`.
+2. Copy it to a temp path, restore-test it, and require `PRAGMA quick_check`
+   = `ok` on the copy.
+3. Record `--duplicates-db` totals on the copy.
+4. Delete only exact copies, keeping `MIN(id)` per group of identical value
+   columns (not per timestamp, which would delete the Jul 27-28 distinct
+   samples). Expected removal: 31,625 rows as of 2026-09-28.
+5. Re-run the report: `content_duplicate_excess` 0; `timestamp_duplicate_excess`
+   equal to the Jul 27-28 residue.
+
+The corrected-SOC estimate (`soc_estimate.py`) already integrates over
+distinct timestamps, so it does not depend on this cleanup.
 
 Scope: duplicate rows in Anton's `bms_telemetry` table. Touches the firmware
 publish path (`esp32-sim7670g/main/mqtt.c`), the logger ingest path
@@ -160,6 +240,8 @@ database holds `bms-404CCAFFFE43` and `gw-commissioning-test` history from
 firmware that will never publish an identity.
 
 ### C. Content-hash dedup at the logger (backend only, no firmware change)
+
+*2026-09-28: implemented in narrowed form as the legacy guard; see Status.*
 
 Hash the normalized payload and reject a row whose `(bms_id, timestamp, hash)`
 was already seen inside a short window. Attractive because it ships without

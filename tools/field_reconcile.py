@@ -14,6 +14,7 @@ import csv
 import hashlib
 import io
 import json
+import sqlite3
 import statistics
 import sys
 from collections import Counter
@@ -296,11 +297,124 @@ def verify_baseline(path: Path) -> dict:
     }
 
 
+# Every value column a device sends. Two rows equal in all of them are the same
+# sample delivered twice; rows sharing only a timestamp may be distinct samples.
+TELEMETRY_VALUE_COLUMNS = (
+    "bms_id", "timestamp", "elapsed_seconds", "elapsed_hms", "total_energy_wh",
+    "pack_voltage_v", "pack_current_a", "state_of_charge_pct", "power_w",
+    "full_capacity_ah", "peak_current_a", "peak_power_w", "cell_count",
+    "min_cell_voltage_v", "min_cell_num", "max_cell_voltage_v", "max_cell_num",
+    "cell_voltage_delta_v", "temp_count", "min_temp_c", "max_temp_c",
+    "charging_enabled", "discharging_enabled", "cells_v_1", "cells_v_2",
+    "cells_v_3", "cells_v_4", "temps_c_1", "temps_c_2", "temps_c_3",
+)
+
+
+def duplicate_report(database: Path, device_id: str) -> dict:
+    """Per-boot duplicate counts from a telemetry database, opened read-only.
+
+    Boots are windows between the first status check-in of each boot_id, by
+    capture timestamp. The `timestamp_duplicate_excess` column is the plan's
+    COUNT(*) - COUNT(DISTINCT timestamp) check; `content_duplicate_excess`
+    counts only rows identical in every value column, which is what a
+    redelivery produces. Identified rows are also grouped by their own
+    delivery_boot_id, where any excess means the unique index is missing.
+    """
+    conn = sqlite3.connect(f"file:{database}?mode=ro", uri=True)
+    try:
+        boots = conn.execute(
+            """
+            SELECT boot_id, MIN(received_at) AS started
+            FROM device_status_checkins
+            WHERE device_id = ?
+            GROUP BY boot_id
+            ORDER BY started
+            """,
+            (device_id,),
+        ).fetchall()
+        windows = [("before_first_status", None, boots[0][1] if boots else None)]
+        for index, (boot_id, started) in enumerate(boots):
+            ended = boots[index + 1][1] if index + 1 < len(boots) else None
+            windows.append((boot_id, started, ended))
+
+        value_columns = ", ".join(TELEMETRY_VALUE_COLUMNS)
+        segments = []
+        for boot_id, started, ended in windows:
+            clause = "bms_id = ? AND timestamp_valid = 1"
+            params: list = [device_id]
+            if started is not None:
+                clause += " AND timestamp >= ?"
+                params.append(started)
+            if ended is not None:
+                clause += " AND timestamp < ?"
+                params.append(ended)
+            rows, distinct_ts = conn.execute(
+                f"SELECT COUNT(*), COUNT(DISTINCT timestamp) "
+                f"FROM bms_telemetry WHERE {clause}",
+                params,
+            ).fetchone()
+            if not rows:
+                continue
+            distinct_rows = conn.execute(
+                f"SELECT COUNT(*) FROM (SELECT DISTINCT {value_columns} "
+                f"FROM bms_telemetry WHERE {clause})",
+                params,
+            ).fetchone()[0]
+            segments.append({
+                "boot_id": boot_id,
+                "window_start": started,
+                "db_rows": rows,
+                "distinct_timestamps": distinct_ts,
+                "timestamp_duplicate_excess": rows - distinct_ts,
+                "content_duplicate_excess": rows - distinct_rows,
+            })
+
+        identified = [
+            {
+                "delivery_boot_id": boot_id,
+                "rows": rows,
+                "distinct_sequences": sequences,
+                "duplicate_excess": rows - sequences,
+            }
+            for boot_id, rows, sequences in conn.execute(
+                """
+                SELECT delivery_boot_id, COUNT(*), COUNT(DISTINCT delivery_sequence)
+                FROM bms_telemetry
+                WHERE bms_id = ? AND delivery_boot_id IS NOT NULL
+                GROUP BY delivery_boot_id
+                ORDER BY MIN(id)
+                """,
+                (device_id,),
+            )
+        ]
+    finally:
+        conn.close()
+
+    return {
+        "device_id": device_id,
+        "boots": segments,
+        "identified_deliveries": identified,
+        "totals": {
+            key: sum(segment[key] for segment in segments)
+            for key in (
+                "db_rows",
+                "timestamp_duplicate_excess",
+                "content_duplicate_excess",
+            )
+        },
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--card-dir", type=Path)
     parser.add_argument("--production-jsonl", type=Path)
     parser.add_argument("--verify-baseline", type=Path)
+    parser.add_argument(
+        "--duplicates-db", type=Path,
+        help="report per-boot duplicate rates from a telemetry database copy",
+    )
+    parser.add_argument("--device", default="gw-e3aba4")
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -308,7 +422,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
-        if args.verify_baseline:
+        if args.duplicates_db:
+            if args.card_dir or args.production_jsonl or args.verify_baseline:
+                raise ValueError("--duplicates-db cannot be combined with other inputs")
+            report = duplicate_report(args.duplicates_db, args.device)
+        elif args.verify_baseline:
             if args.card_dir or args.production_jsonl:
                 raise ValueError("--verify-baseline cannot be combined with raw inputs")
             report = verify_baseline(args.verify_baseline)

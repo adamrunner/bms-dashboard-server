@@ -106,10 +106,34 @@ MONITOR_INTERVAL_SECONDS = int(os.getenv("MONITOR_INTERVAL_SECONDS", "60"))
 CONNECT_RETRY_MIN_SECONDS = int(os.getenv("CONNECT_RETRY_MIN_SECONDS", "5"))
 CONNECT_RETRY_MAX_SECONDS = int(os.getenv("CONNECT_RETRY_MAX_SECONDS", "60"))
 
-INSERT_COLUMNS = ', '.join(EXPECTED_COLUMNS)
-INSERT_COLUMNS = f"{INSERT_COLUMNS}, timestamp_valid"
-INSERT_PLACEHOLDERS = ', '.join(['?' for _ in range(len(EXPECTED_COLUMNS) + 1)])
+INSERT_COLUMN_NAMES = EXPECTED_COLUMNS + [
+    'timestamp_valid', 'delivery_boot_id', 'delivery_sequence'
+]
+INSERT_COLUMNS = ', '.join(INSERT_COLUMN_NAMES)
+INSERT_PLACEHOLDERS = ', '.join(['?' for _ in INSERT_COLUMN_NAMES])
 INSERT_SQL = f"INSERT INTO bms_telemetry ({INSERT_COLUMNS}) VALUES ({INSERT_PLACEHOLDERS})"
+# The conflict target must restate the partial index's WHERE clause for SQLite
+# to match it to idx_telemetry_delivery_identity.
+IDENTIFIED_INSERT_SQL = (
+    f"{INSERT_SQL} ON CONFLICT (bms_id, delivery_boot_id, delivery_sequence) "
+    "WHERE delivery_boot_id IS NOT NULL AND delivery_sequence IS NOT NULL "
+    "DO NOTHING"
+)
+# Legacy CSV carries no delivery identity. A row identical in every field --
+# including elapsed_seconds, the device's uptime counter -- to one already
+# stored is a second delivery of the same sample, not a new reading: a pack at
+# rest repeats its values, but never its capture time and uptime together.
+LEGACY_DUPLICATE_SQL = (
+    "SELECT 1 FROM bms_telemetry WHERE "
+    + " AND ".join(f"{column} IS ?" for column in EXPECTED_COLUMNS)
+    + " LIMIT 1"
+)
+
+# Schema-v2 telemetry envelope (esp32-sim7670g FIELD_RELIABILITY_REMEDIATION_PLAN
+# "MQTT delivery envelope"); validated to match tools/field_reconcile.py.
+MAX_TELEMETRY_PAYLOAD_BYTES = 8192
+MAX_DELIVERY_SEQUENCE = 0xffffffff
+BOOT_ID_RE = re.compile(r'^[A-Za-z0-9_-]{1,64}$')
 
 STATUS_REQUIRED_STRING_FIELDS = {
     'device_id': 64,
@@ -226,51 +250,183 @@ def normalize_telemetry_row(row):
     )
 
 
-def insert_telemetry_data(csv_data):
-    """Parse CSV data and insert into database"""
+def content_dedup_enabled() -> bool:
+    """Whether legacy CSV rows are checked against identical stored rows."""
+    return os.getenv('TELEMETRY_CONTENT_DEDUP', '1').strip().lower() not in (
+        '0', 'false', 'no', 'off'
+    )
+
+
+_telemetry_counters_lock = threading.Lock()
+_telemetry_counters = {
+    'telemetry_rows_inserted': 0,
+    'telemetry_identified_duplicates_suppressed': 0,
+    'telemetry_content_duplicates_suppressed': 0,
+    'telemetry_rows_rejected': 0,
+}
+
+
+def _count(**increments) -> dict:
+    with _telemetry_counters_lock:
+        for key, value in increments.items():
+            _telemetry_counters[key] += value
+        return dict(_telemetry_counters)
+
+
+def parse_telemetry_envelope(payload: str, topic: str | None = None) -> dict:
+    """Validate one schema-v2 telemetry envelope and return its parts."""
+    try:
+        envelope = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid envelope JSON: {exc.msg}") from exc
+    if not isinstance(envelope, dict) or envelope.get('schema_version') != 2:
+        raise ValueError("expected a schema-v2 telemetry envelope")
+
+    device_id = envelope.get('device_id')
+    boot_id = envelope.get('boot_id')
+    sequence = envelope.get('sequence')
+    csv_line = envelope.get('csv')
+    if (
+        not isinstance(device_id, str)
+        or len(device_id) > 64
+        or not DEVICE_ID_RE.fullmatch(device_id)
+    ):
+        raise ValueError("envelope device_id must be a valid device ID")
+    if not isinstance(boot_id, str) or not BOOT_ID_RE.fullmatch(boot_id):
+        raise ValueError("envelope boot_id must be 1-64 characters of [A-Za-z0-9_-]")
+    if type(sequence) is not int or not 0 <= sequence <= MAX_DELIVERY_SEQUENCE:
+        raise ValueError("envelope sequence must be an unsigned 32-bit integer")
+    if not isinstance(csv_line, str) or not csv_line.strip():
+        raise ValueError("envelope csv must be a non-empty string")
+    if topic is not None:
+        topic_device_id = topic.rsplit('/', 1)[-1]
+        if topic_device_id != device_id:
+            raise ValueError(
+                f"topic device ID {topic_device_id!r} does not match envelope {device_id!r}"
+            )
+
+    rows = [row for row in csv.reader(io.StringIO(csv_line.strip())) if row]
+    if len(rows) != 1:
+        raise ValueError("envelope csv must hold exactly one row")
+    row = normalize_telemetry_row(rows[0])
+    if row[0].strip() != device_id:
+        raise ValueError("envelope and CSV device IDs do not match")
+    captured_at = convert_value(row[1], 'timestamp')
+    if type(envelope.get('captured_at')) is not int or envelope['captured_at'] != captured_at:
+        raise ValueError("envelope captured_at does not match the CSV timestamp")
+    timestamp_valid = envelope.get('timestamp_valid')
+    if type(timestamp_valid) is not bool:
+        raise ValueError("envelope timestamp_valid must be boolean")
+    if timestamp_valid != (captured_at > 0):
+        raise ValueError("envelope timestamp_valid contradicts captured_at")
+
+    return {'row': row, 'boot_id': boot_id, 'sequence': sequence}
+
+
+def _convert_row(normalized_row, boot_id=None, sequence=None) -> list:
+    converted_row = [
+        convert_value(value, EXPECTED_COLUMNS[i])
+        for i, value in enumerate(normalized_row)
+    ]
+    capture_timestamp = converted_row[1]
+    converted_row.append(capture_timestamp is not None and capture_timestamp > 0)
+    converted_row.extend([boot_id, sequence])
+    return converted_row
+
+
+def insert_telemetry_data(payload, topic=None):
+    """Parse one telemetry payload and insert its rows.
+
+    Accepts legacy headerless CSV (one or more rows) or one schema-v2 envelope.
+    Returns counts of what happened, for tests and logging.
+    """
+    result = {'inserted': 0, 'identified_duplicates': 0,
+              'content_duplicates': 0, 'rejected': 0}
     conn = None
     try:
-        # Parse CSV data (no headers in MQTT data)
-        csv_reader = csv.reader(io.StringIO(csv_data.strip()))
-
-        conn = create_db_connection(use_row_factory=False)
-        cursor = conn.cursor()
-        rows_to_insert = []
-
-        for row in csv_reader:
-            try:
-                normalized_row = normalize_telemetry_row(row)
-            except ValueError as exc:
-                logger.warning(f"Rejected telemetry row: {exc}")
-                continue
-
-            converted_row = [
-                convert_value(value, EXPECTED_COLUMNS[i])
-                for i, value in enumerate(normalized_row)
-            ]
-            capture_timestamp = converted_row[1]
-            converted_row.append(
-                capture_timestamp is not None and capture_timestamp > 0
+        if len(payload.encode('utf-8')) > MAX_TELEMETRY_PAYLOAD_BYTES:
+            logger.warning(
+                f"Rejected telemetry payload over {MAX_TELEMETRY_PAYLOAD_BYTES} bytes"
             )
-            rows_to_insert.append(converted_row)
+            result['rejected'] += 1
+            return result
+        stripped = payload.strip()
+        identified = stripped.startswith('{')
+        rows_to_insert = []
+        if identified:
+            try:
+                envelope = parse_telemetry_envelope(stripped, topic)
+            except ValueError as exc:
+                logger.warning(f"Rejected telemetry envelope: {exc}")
+                result['rejected'] += 1
+            else:
+                rows_to_insert.append(_convert_row(
+                    envelope['row'], envelope['boot_id'], envelope['sequence']
+                ))
+        else:
+            # Parse CSV data (no headers in MQTT data)
+            for row in csv.reader(io.StringIO(stripped)):
+                try:
+                    normalized_row = normalize_telemetry_row(row)
+                except ValueError as exc:
+                    logger.warning(f"Rejected telemetry row: {exc}")
+                    result['rejected'] += 1
+                    continue
+                rows_to_insert.append(_convert_row(normalized_row))
 
         if not rows_to_insert:
             logger.warning("No valid telemetry rows found in MQTT payload")
-            return
+            return result
 
-        cursor.executemany(INSERT_SQL, rows_to_insert)
-        rows_inserted = len(rows_to_insert)
-        
+        conn = create_db_connection(use_row_factory=False)
+        cursor = conn.cursor()
+        check_content = content_dedup_enabled()
+        for converted_row in rows_to_insert:
+            if identified:
+                cursor.execute(IDENTIFIED_INSERT_SQL, converted_row)
+                if cursor.rowcount == 0:
+                    result['identified_duplicates'] += 1
+                    logger.info(
+                        "Suppressed duplicate delivery %s boot %s sequence %s",
+                        converted_row[0], converted_row[-2], converted_row[-1]
+                    )
+                    continue
+            else:
+                if check_content and cursor.execute(
+                    LEGACY_DUPLICATE_SQL, converted_row[:len(EXPECTED_COLUMNS)]
+                ).fetchone():
+                    result['content_duplicates'] += 1
+                    logger.info(
+                        "Suppressed duplicate legacy row %s at %s",
+                        converted_row[0], converted_row[1]
+                    )
+                    continue
+                cursor.execute(INSERT_SQL, converted_row)
+            result['inserted'] += 1
+
         conn.commit()
-        logger.info(f"Successfully inserted {rows_inserted} row(s) of telemetry data")
-        
+        if result['inserted']:
+            logger.info(
+                f"Successfully inserted {result['inserted']} row(s) of telemetry data"
+            )
+
     except Exception as e:
         logger.error(f"Failed to insert telemetry data: {e}")
         if conn:
             conn.rollback()
+        result['inserted'] = 0
     finally:
         if conn:
             conn.close()
+        counters = _count(
+            telemetry_rows_inserted=result['inserted'],
+            telemetry_identified_duplicates_suppressed=result['identified_duplicates'],
+            telemetry_content_duplicates_suppressed=result['content_duplicates'],
+            telemetry_rows_rejected=result['rejected'],
+        )
+        if any(result.values()):
+            update_health_state(**counters)
+    return result
 
 
 def normalize_status_payload(payload: str, topic: str, mqtt_retained: bool = False) -> dict:
@@ -568,7 +724,7 @@ def on_message(client, userdata, msg):
         elif mqtt.topic_matches_sub(MQTT_STATUS_TOPIC, msg.topic):
             insert_status_data(payload, msg.topic, msg.retain)
         elif mqtt.topic_matches_sub(MQTT_TOPIC, msg.topic):
-            insert_telemetry_data(payload)
+            insert_telemetry_data(payload, msg.topic)
         else:
             logger.warning("Ignoring message on unexpected topic: %s", msg.topic)
         

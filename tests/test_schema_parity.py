@@ -31,6 +31,7 @@ EXPECTED_COLUMN_ORDER = {
         "max_temp_c", "charging_enabled", "discharging_enabled", "cells_v_1",
         "cells_v_2", "cells_v_3", "cells_v_4", "temps_c_1", "temps_c_2",
         "temps_c_3", "created_at", "bms_id", "timestamp_valid",
+        "delivery_boot_id", "delivery_sequence",
     ],
     "device_status_checkins": [
         "id", "device_id", "schema_version", "firmware_version", "ota_slot",

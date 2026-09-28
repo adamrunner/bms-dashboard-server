@@ -65,6 +65,9 @@ services:
       # arrives every ~10s and the broker keepalive is 120s.
       TELEMETRY_STALE_AFTER_SECONDS: ${TELEMETRY_STALE_AFTER_SECONDS:-900}
       MONITOR_INTERVAL_SECONDS: ${MONITOR_INTERVAL_SECONDS:-60}
+      # Drop a legacy CSV row identical in every field to a stored one (a
+      # redelivery). Envelope rows are deduplicated by identity regardless.
+      TELEMETRY_CONTENT_DEDUP: ${TELEMETRY_CONTENT_DEDUP:-1}
     volumes:
       - .:/app/data
     networks:

@@ -67,13 +67,23 @@ CREATE TABLE IF NOT EXISTS bms_telemetry (
     bms_id TEXT,
     -- A zero/negative gateway timestamp means capture occurred before wall
     -- clock synchronization. Such samples are preserved but never charted.
-    timestamp_valid BOOLEAN NOT NULL DEFAULT 1
+    timestamp_valid BOOLEAN NOT NULL DEFAULT 1,
+    -- Delivery identity from the schema-v2 telemetry envelope, appended by
+    -- migration (TELEMETRY_POLICY_COLUMNS). NULL for legacy CSV deliveries.
+    -- The firmware assigns the sequence once per captured row and reuses it on
+    -- every retry and spool replay, so one identity is one logical sample.
+    delivery_boot_id TEXT,
+    delivery_sequence INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_bms_id ON bms_telemetry(bms_id);
 CREATE INDEX IF NOT EXISTS idx_timestamp ON bms_telemetry(timestamp);
 CREATE INDEX IF NOT EXISTS idx_bms_id_timestamp ON bms_telemetry(bms_id, timestamp);
 CREATE INDEX IF NOT EXISTS idx_created_at ON bms_telemetry(created_at);
+
+-- NOTE: idx_telemetry_delivery_identity covers delivery_boot_id and
+-- delivery_sequence, migration-added columns, so it is created in
+-- ensure_database_schema() AFTER the ALTER TABLE pass.
 
 CREATE TABLE IF NOT EXISTS device_status_checkins (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

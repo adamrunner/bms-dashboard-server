@@ -1675,7 +1675,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertTrue(self.stale_alerts("gw-resume")[0]['active'])
 
         bms_mqtt_logger.insert_telemetry_data(
-            build_payload("gw-resume", int(time.time()))
+            build_payload("gw-resume", int(time.time()) + 10)
         )
         database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
 
@@ -1692,9 +1692,11 @@ class DashboardSystemTestCase(unittest.TestCase):
         database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
 
         # The device comes back, then goes silent again. The recovery row has
-        # its own ingest time, so this is a distinct outage.
+        # its own ingest time, so this is a distinct outage. It is a new sample
+        # (later capture time): an identical row would be suppressed as a
+        # duplicate delivery.
         bms_mqtt_logger.insert_telemetry_data(
-            build_payload("gw-twice", int(time.time()))
+            build_payload("gw-twice", int(time.time()) + 10)
         )
         database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
         self.age_last_row(2000)
@@ -1717,9 +1719,10 @@ class DashboardSystemTestCase(unittest.TestCase):
         database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
         first = self.stale_alerts("gw-recur")[0]
 
-        # Recover, then fall silent again at the very same ingest second.
+        # Recover with a new sample, then fall silent again at the very same
+        # ingest second.
         bms_mqtt_logger.insert_telemetry_data(
-            build_payload("gw-recur", int(time.time()))
+            build_payload("gw-recur", int(time.time()) + 10)
         )
         database_queries.evaluate_telemetry_staleness(stale_after_seconds=900)
         self.assertFalse(self.stale_alerts("gw-recur")[0]['active'])
