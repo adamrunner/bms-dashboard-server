@@ -348,7 +348,7 @@ class DashboardSystemTestCase(unittest.TestCase):
         self.assertFalse(latest["mqtt_retained"])
         self.assertTrue(latest["reported_online"])
 
-    def test_mqtt_connect_subscribes_to_telemetry_status_and_availability(self):
+    def test_mqtt_connect_subscribes_to_telemetry_status_availability_and_charger(self):
         client = mock.Mock()
         client.subscribe.return_value = (0, 42)
 
@@ -358,6 +358,7 @@ class DashboardSystemTestCase(unittest.TestCase):
             (bms_mqtt_logger.MQTT_TOPIC, 0),
             (bms_mqtt_logger.MQTT_STATUS_TOPIC, 1),
             (bms_mqtt_logger.MQTT_AVAILABILITY_TOPIC, 1),
+            (bms_mqtt_logger.MQTT_CHARGER_TOPIC, 0),
         ])
 
     def test_status_validation_rejects_bad_payloads(self):

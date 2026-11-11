@@ -166,3 +166,46 @@ CREATE INDEX IF NOT EXISTS idx_device_alerts_device_detected
     ON device_alerts(device_id, detected_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS idx_device_alerts_active
     ON device_alerts(device_id, resolved_at, detected_at DESC);
+
+-- Renogy DC-DC charger samples from a gateway polling the charger over RS485
+-- (esp32-sim7670g "charger schema v1", MQTT charger/telemetry/<device_id>,
+-- headerless CSV). Columns follow the CSV order; the gateway's schema is
+-- append-only, and so is this table. Enumerations and fault words are raw
+-- register values (decode with ~/Code/Renogy/dcc-register-map.md).
+-- output_w is register 0x0124, which reads 0 on the RBC40D1U while charging:
+-- use aux_battery_v * charge_current_a for output power.
+CREATE TABLE IF NOT EXISTS charger_telemetry (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    device_id TEXT NOT NULL,
+    timestamp INTEGER NOT NULL,
+    elapsed_sec INTEGER NOT NULL,
+    aux_battery_v REAL,
+    charge_current_a REAL,
+    output_w INTEGER,
+    alternator_v REAL,
+    alternator_current_a REAL,
+    alternator_w INTEGER,
+    soc_pct REAL,
+    controller_temp_c INTEGER,
+    battery_temp_c INTEGER,
+    charging_state INTEGER,
+    monitor_mode INTEGER,
+    ign BOOLEAN,
+    faults_hi INTEGER,
+    faults_lo INTEGER,
+    current_limit_a INTEGER,
+    daily_ah INTEGER,
+    daily_kwh REAL,
+    total_ah INTEGER,
+    total_kwh REAL,
+    timestamp_valid BOOLEAN NOT NULL,
+    received_at INTEGER NOT NULL
+);
+
+-- Charger rows carry no delivery envelope, so a QoS 1 redelivery is
+-- recognized by capture time plus device uptime, which a new sample never
+-- repeats together. Also serves per-device time-range queries.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_charger_sample_identity
+    ON charger_telemetry(device_id, timestamp, elapsed_sec);
+CREATE INDEX IF NOT EXISTS idx_charger_received
+    ON charger_telemetry(received_at);

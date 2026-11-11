@@ -53,6 +53,14 @@ EXPECTED_COLUMN_ORDER = {
         "dedup_key", "details_json", "detected_at", "acknowledged_at",
         "resolved_at",
     ],
+    "charger_telemetry": [
+        "id", "device_id", "timestamp", "elapsed_sec", "aux_battery_v",
+        "charge_current_a", "output_w", "alternator_v", "alternator_current_a",
+        "alternator_w", "soc_pct", "controller_temp_c", "battery_temp_c",
+        "charging_state", "monitor_mode", "ign", "faults_hi", "faults_lo",
+        "current_limit_a", "daily_ah", "daily_kwh", "total_ah", "total_kwh",
+        "timestamp_valid", "received_at",
+    ],
 }
 
 

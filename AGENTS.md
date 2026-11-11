@@ -80,6 +80,10 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 - **MQTT Logger** (`bms_mqtt_logger.py`) → subscribes to `bms/telemetry/+` topic → parses CSV → stores in SQLite
 - Data format: CSV without headers, with 23 fixed columns followed by the
   declared number of cell-voltage and temperature values.
+- **Renogy DC-DC charger**: the gateway also publishes headerless 22-column
+  CSV ("charger schema v1") on `charger/telemetry/<device_id>`; the logger
+  stores it in `charger_telemetry`, deduplicating QoS 1 redeliveries on
+  `(device_id, timestamp, elapsed_sec)`. The dashboard does not show it yet.
 
 ### 2. Web Dashboard 
 - **Flask application** (`dashboard_server.py`) with Flask-SocketIO for real-time updates

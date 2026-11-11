@@ -59,6 +59,7 @@ services:
       MQTT_TOPIC: ${MQTT_TOPIC:-bms/telemetry/+}
       MQTT_STATUS_TOPIC: ${MQTT_STATUS_TOPIC:-bms/status/+}
       MQTT_AVAILABILITY_TOPIC: ${MQTT_AVAILABILITY_TOPIC:-bms/availability/+}
+      MQTT_CHARGER_TOPIC: ${MQTT_CHARGER_TOPIC:-charger/telemetry/+}
       DATABASE_PATH: /app/data/bms_telemetry.db
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       # Alert when a device has sent nothing for this long. Telemetry normally

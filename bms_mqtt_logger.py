@@ -94,6 +94,7 @@ MQTT_AVAILABILITY_TOPIC = os.getenv(
     "MQTT_AVAILABILITY_TOPIC",
     "bms/availability/+"
 )
+MQTT_CHARGER_TOPIC = os.getenv("MQTT_CHARGER_TOPIC", "charger/telemetry/+")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "bms_telemetry.db")
 
 # The container healthcheck reads this file. It must report MQTT connectivity
@@ -625,6 +626,135 @@ def insert_availability_data(
     return row_id
 
 
+# Renogy DC-DC charger rows, esp32-sim7670g "charger schema v1": headerless
+# CSV in this exact order. The gateway only ever appends columns, so a longer
+# row is a newer schema this logger does not understand yet and is rejected
+# rather than truncated.
+CHARGER_CSV_COLUMNS = [
+    'device_id', 'timestamp', 'elapsed_sec', 'aux_battery_v',
+    'charge_current_a', 'output_w', 'alternator_v', 'alternator_current_a',
+    'alternator_w', 'soc_pct', 'controller_temp_c', 'battery_temp_c',
+    'charging_state', 'monitor_mode', 'ign', 'faults_hi', 'faults_lo',
+    'current_limit_a', 'daily_ah', 'daily_kwh', 'total_ah', 'total_kwh',
+]
+CHARGER_INTEGER_COLUMNS = {
+    'timestamp', 'elapsed_sec', 'output_w', 'alternator_w',
+    'controller_temp_c', 'battery_temp_c', 'charging_state', 'monitor_mode',
+    'faults_hi', 'faults_lo', 'current_limit_a', 'daily_ah', 'total_ah',
+}
+CHARGER_INSERT_COLUMNS = CHARGER_CSV_COLUMNS + ['timestamp_valid', 'received_at']
+CHARGER_INSERT_SQL = (
+    f"INSERT INTO charger_telemetry ({', '.join(CHARGER_INSERT_COLUMNS)}) "
+    f"VALUES ({', '.join('?' for _ in CHARGER_INSERT_COLUMNS)}) "
+    "ON CONFLICT (device_id, timestamp, elapsed_sec) DO NOTHING"
+)
+
+
+def normalize_charger_row(row: list, topic: str | None = None) -> list:
+    """Validate one charger CSV row and return its typed values, in CSV order."""
+    if len(row) != len(CHARGER_CSV_COLUMNS):
+        raise ValueError(
+            f"row has {len(row)} columns; charger schema v1 has {len(CHARGER_CSV_COLUMNS)}"
+        )
+    device_id = row[0].strip()
+    if len(device_id) > 64 or not DEVICE_ID_RE.fullmatch(device_id):
+        raise ValueError("device_id must be a valid device ID")
+    if topic is not None:
+        topic_device_id = topic.rsplit('/', 1)[-1]
+        if topic_device_id != device_id:
+            raise ValueError(
+                f"topic device ID {topic_device_id!r} does not match CSV {device_id!r}"
+            )
+
+    values = [device_id]
+    for column, raw in zip(CHARGER_CSV_COLUMNS[1:], row[1:]):
+        raw = raw.strip()
+        try:
+            if column == 'ign':
+                if raw not in ('0', '1'):
+                    raise ValueError
+                values.append(raw == '1')
+            elif column in CHARGER_INTEGER_COLUMNS:
+                values.append(int(raw))
+            else:
+                values.append(float(raw))
+        except ValueError:
+            raise ValueError(f"{column} has invalid value {raw!r}") from None
+    if values[1] < 0 or values[2] < 0:
+        raise ValueError("timestamp and elapsed_sec must not be negative")
+    return values
+
+
+_charger_counters = {
+    'charger_rows_inserted': 0,
+    'charger_duplicates_suppressed': 0,
+    'charger_rows_rejected': 0,
+}
+
+
+def insert_charger_data(payload: str, topic: str | None = None) -> dict:
+    """Parse one charger payload (one or more CSV rows) and insert its rows."""
+    result = {'inserted': 0, 'duplicates': 0, 'rejected': 0}
+    conn = None
+    try:
+        if len(payload.encode('utf-8')) > MAX_TELEMETRY_PAYLOAD_BYTES:
+            logger.warning(
+                f"Rejected charger payload over {MAX_TELEMETRY_PAYLOAD_BYTES} bytes"
+            )
+            result['rejected'] += 1
+            return result
+        received_at = int(time.time())
+        rows_to_insert = []
+        for row in csv.reader(io.StringIO(payload.strip())):
+            if not row:
+                continue
+            try:
+                values = normalize_charger_row(row, topic)
+            except ValueError as exc:
+                logger.warning(f"Rejected charger row: {exc}")
+                result['rejected'] += 1
+                continue
+            rows_to_insert.append(values + [values[1] > 0, received_at])
+
+        if not rows_to_insert:
+            if not result['rejected']:
+                logger.warning("No charger rows found in MQTT payload")
+            return result
+
+        conn = create_db_connection(use_row_factory=False)
+        cursor = conn.cursor()
+        for values in rows_to_insert:
+            cursor.execute(CHARGER_INSERT_SQL, values)
+            if cursor.rowcount == 0:
+                result['duplicates'] += 1
+                logger.info(
+                    "Suppressed duplicate charger row %s at %s uptime %ss",
+                    values[0], values[1], values[2]
+                )
+            else:
+                result['inserted'] += 1
+        conn.commit()
+        if result['inserted']:
+            logger.info(f"Inserted {result['inserted']} charger row(s)")
+
+    except Exception as e:
+        logger.error(f"Failed to insert charger data: {e}")
+        if conn:
+            conn.rollback()
+        result['inserted'] = 0
+    finally:
+        if conn:
+            conn.close()
+        with _telemetry_counters_lock:
+            _charger_counters['charger_rows_inserted'] += result['inserted']
+            _charger_counters['charger_duplicates_suppressed'] += result['duplicates']
+            _charger_counters['charger_rows_rejected'] += result['rejected']
+            counters = dict(_charger_counters)
+        if any(result.values()):
+            update_health_state(**counters)
+    return result
+
+
 _health_lock = threading.Lock()
 _health_state = {
     'mqtt_connected': False,
@@ -692,12 +822,14 @@ def on_connect(client, userdata, flags, rc):
             (MQTT_TOPIC, 0),
             (MQTT_STATUS_TOPIC, 1),
             (MQTT_AVAILABILITY_TOPIC, 1),
+            (MQTT_CHARGER_TOPIC, 0),
         ])
         logger.info(
-            "Subscribed to topics: %s, %s, and %s, result=%s, mid=%s",
+            "Subscribed to topics: %s, %s, %s, and %s, result=%s, mid=%s",
             MQTT_TOPIC,
             MQTT_STATUS_TOPIC,
             MQTT_AVAILABILITY_TOPIC,
+            MQTT_CHARGER_TOPIC,
             result,
             mid
         )
@@ -725,6 +857,8 @@ def on_message(client, userdata, msg):
             insert_status_data(payload, msg.topic, msg.retain)
         elif mqtt.topic_matches_sub(MQTT_TOPIC, msg.topic):
             insert_telemetry_data(payload, msg.topic)
+        elif mqtt.topic_matches_sub(MQTT_CHARGER_TOPIC, msg.topic):
+            insert_charger_data(payload, msg.topic)
         else:
             logger.warning("Ignoring message on unexpected topic: %s", msg.topic)
         
