@@ -19,9 +19,12 @@ from database_queries import (
     get_latest_device_availability, get_latest_availability_record_id,
     get_device_status_history, get_fleet_status, get_device_alerts,
     acknowledge_device_alert, get_firmware_expectations,
-    set_firmware_expectation, delete_firmware_expectation
+    set_firmware_expectation, delete_firmware_expectation,
+    get_charger_data_for_view, get_latest_charger_point_for_view,
+    get_latest_charger_reading, get_latest_charger_record_id
 )
 from soc_estimate import annotate_records, get_latest_corrected_soc
+from charger_registers import decode_charger_reading
 
 DEVELOPMENT_ENV_NAMES = {'development', 'dev', 'local'}
 DEVICE_ID_RE = re.compile(r'^[A-Za-z0-9][A-Za-z0-9_-]*$')
@@ -63,6 +66,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", async_mode='eventlet')
 last_seen_record_id = None
 last_seen_status_id = None
 last_seen_availability_id = None
+last_seen_charger_id = None
 monitoring_thread = None
 monitoring_active = False
 connected_clients = set()
@@ -181,10 +185,75 @@ def get_view_records(view_config):
     return records, meta
 
 
+def get_latest_charger_view_reading(device_id):
+    """Newest decoded charger reading, with its age, or None."""
+    reading = decode_charger_reading(get_latest_charger_reading(device_id))
+    if reading:
+        reading['received_age_seconds'] = max(
+            0, int(time.time()) - reading['received_at']
+        )
+    return reading
+
+
+def get_charger_view_payload(view_config):
+    """Charger series and latest reading for a view.
+
+    Best-effort, like the SOC estimate: a charger query failure must never
+    take down the BMS view it rides along with.
+    """
+    try:
+        records, meta = get_charger_data_for_view(
+            view_config['hours'],
+            view_config['bms_id'],
+            view_config['resolution'],
+            view_config['target_points'],
+            start_ts=view_config['start_ts'],
+            end_ts=view_config['end_ts']
+        )
+        return {
+            'records': records,
+            'latest_reading': get_latest_charger_view_reading(view_config['bms_id']),
+            'meta': meta
+        }
+    except Exception as charger_error:
+        print(f"Charger view failed: {charger_error}")
+        return {'records': [], 'latest_reading': None, 'meta': {}}
+
+
+def emit_charger_updates():
+    """Push the newest charger point and reading to every live view."""
+    for sid in list(connected_clients):
+        view_cfg = client_view_config.get(sid, DEFAULT_VIEW_CONFIG)
+        if view_cfg.get('mode') == 'absolute':
+            continue
+        device_id = view_cfg.get('bms_id')
+        point = get_latest_charger_point_for_view(
+            view_cfg['hours'],
+            device_id,
+            view_cfg['resolution'],
+            view_cfg['target_points']
+        )
+        if not point:
+            continue
+        bucket_seconds = resolve_bucket_seconds(
+            view_cfg['hours'], view_cfg['resolution'], view_cfg['target_points']
+        )
+        socketio.server.emit('charger_update', {
+            'point': point,
+            'latest_reading': get_latest_charger_view_reading(device_id),
+            'meta': {
+                'bucket_seconds': bucket_seconds,
+                'is_aggregated': should_aggregate_view(
+                    view_cfg['hours'], view_cfg['resolution'], bucket_seconds
+                )
+            }
+        }, room=sid)
+
+
 def background_monitor():
     """Background thread to monitor database for new data"""
     global last_seen_record_id, last_seen_status_id, last_seen_availability_id
-    global monitoring_active, last_stats_update
+    global last_seen_charger_id, monitoring_active, last_stats_update
     
     print(f"Background monitor started, initial record id: {last_seen_record_id}")
     
@@ -199,6 +268,7 @@ def background_monitor():
             current_latest_record_id = get_latest_record_id()
             current_latest_status_id = get_latest_status_record_id()
             current_latest_availability_id = get_latest_availability_record_id()
+            current_latest_charger_id = get_latest_charger_record_id()
 
             if current_latest_record_id and current_latest_record_id != last_seen_record_id:
                 print(
@@ -320,7 +390,17 @@ def background_monitor():
                         room=sid
                     )
                 last_seen_availability_id = current_latest_availability_id
-            
+
+            if (
+                current_latest_charger_id
+                and current_latest_charger_id != last_seen_charger_id
+            ):
+                try:
+                    emit_charger_updates()
+                except Exception as charger_error:
+                    print(f"Charger emit failed: {charger_error}")
+                last_seen_charger_id = current_latest_charger_id
+
             # Update statistics every 60 seconds
             if current_time - last_stats_update >= 60:
                 if connected_clients:
@@ -380,7 +460,8 @@ def api_data():
                 get_latest_dashboard_point(view_config['bms_id']),
                 view_config['bms_id']
             ),
-            'meta': meta
+            'meta': meta,
+            'charger': get_charger_view_payload(view_config)
         })
     except Exception as e:
         print(f"Error fetching data: {e}")
@@ -695,6 +776,19 @@ def api_firmware_expectation(route_device_id):
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/charger/latest')
+def api_latest_charger():
+    """Newest decoded Renogy charger reading for one gateway."""
+    device_id = request.args.get('bms_id', default=None, type=str) or None
+    if device_id and not DEVICE_ID_RE.fullmatch(device_id):
+        return jsonify({'error': 'Invalid bms_id'}), 400
+    try:
+        return jsonify(get_latest_charger_view_reading(device_id) or {})
+    except Exception as e:
+        print(f"Error fetching charger reading: {e}")
+        return jsonify({'error': str(e)}), 500
+
+
 @app.route('/api/device-availability/latest')
 def api_latest_device_availability():
     """API endpoint for one device's latest MQTT broker-session state."""
@@ -784,7 +878,8 @@ def handle_connect(auth):
     """Handle client connection"""
     global monitoring_active, monitoring_thread, connected_clients
     global last_seen_record_id, last_seen_status_id, last_seen_availability_id
-    
+    global last_seen_charger_id
+
     print(f'Client connected: {request.sid}')
     sid = request.sid
     connected_clients.add(sid)
@@ -797,6 +892,7 @@ def handle_connect(auth):
         last_seen_record_id = get_latest_record_id()
         last_seen_status_id = get_latest_status_record_id()
         last_seen_availability_id = get_latest_availability_record_id()
+        last_seen_charger_id = get_latest_charger_record_id()
         monitoring_active = True
         # Use Flask-SocketIO's background task instead of threading
         socketio.start_background_task(background_monitor)
@@ -860,7 +956,8 @@ def handle_set_view(data):
                 get_latest_dashboard_point(view_config['bms_id']),
                 view_config['bms_id']
             ),
-            'meta': meta
+            'meta': meta,
+            'charger': get_charger_view_payload(view_config)
         })
     except Exception as e:
         print(f"Error handling set_view: {e}")
@@ -894,7 +991,7 @@ def internal_error(error):
 def initialize_monitoring():
     """Initialize the monitoring system"""
     global last_seen_record_id, last_seen_status_id, last_seen_availability_id
-    global last_stats_update
+    global last_seen_charger_id, last_stats_update
     
     try:
         ensure_database_schema()
@@ -902,6 +999,7 @@ def initialize_monitoring():
         last_seen_record_id = get_latest_record_id()
         last_seen_status_id = get_latest_status_record_id()
         last_seen_availability_id = get_latest_availability_record_id()
+        last_seen_charger_id = get_latest_charger_record_id()
         last_stats_update = int(time.time())  # Initialize stats timer
         print(
             "Monitoring initialized with latest telemetry/status/availability "
@@ -913,6 +1011,7 @@ def initialize_monitoring():
         last_seen_record_id = None
         last_seen_status_id = None
         last_seen_availability_id = None
+        last_seen_charger_id = None
         last_stats_update = int(time.time())
 
 

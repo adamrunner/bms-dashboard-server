@@ -104,6 +104,15 @@
     overflow-wrap: anywhere;
 }
 
+/* Orange matches the charger-output series in every chart. */
+#chargerCard {
+    border-left-color: #fd7e14;
+}
+
+.charger-fault-list {
+    padding-left: 1.2rem;
+}
+
 .device-status-monospace {
     font-family: var(--bs-font-monospace);
 }

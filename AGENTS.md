@@ -83,7 +83,12 @@ This is a **Battery Management System (BMS) telemetry monitoring system** with t
 - **Renogy DC-DC charger**: the gateway also publishes headerless 22-column
   CSV ("charger schema v1") on `charger/telemetry/<device_id>`; the logger
   stores it in `charger_telemetry`, deduplicating QoS 1 redeliveries on
-  `(device_id, timestamp, elapsed_sec)`. The dashboard does not show it yet.
+  `(device_id, timestamp, elapsed_sec)`. The dashboard shows it for the
+  gateway picked in the BMS selector (charger `device_id` equals `bms_id`):
+  a status card, power and voltage charts, and charger output current
+  overlaid on Pack Current. Raw state/mode/fault registers are decoded in
+  `charger_registers.py`; output power is derived as
+  `aux_battery_v * charge_current_a` because `output_w` reads 0.
 
 ### 2. Web Dashboard 
 - **Flask application** (`dashboard_server.py`) with Flask-SocketIO for real-time updates

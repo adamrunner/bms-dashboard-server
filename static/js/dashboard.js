@@ -16,6 +16,7 @@ let bmsSelectionReady = false;
 let latestDeviceStatus = null;
 let latestDeviceAvailability = null;
 let deviceStatusAgeTimer = null;
+let latestChargerReading = null;
 
 const VALID_RESOLUTIONS = ['auto', '10s', '30s', '1m', '3m', '5m', '10m', '15m', '30m'];
 const MIN_ABSOLUTE_WINDOW_SECONDS = 10;
@@ -29,6 +30,18 @@ const CHART_DATA_FIELDS = {
     cellDelta: ['cell_voltage_delta_v'],
     power: ['power_w']
 };
+// Charger series fill datasets starting at `offset`; the Pack Current chart
+// keeps the BMS reading in dataset 0 and overlays the charger in dataset 1.
+const CHARGER_CHART_FIELDS = {
+    current: { offset: 1, fields: ['charge_current_a'] },
+    chargerPower: { offset: 0, fields: ['output_power_w', 'alternator_w'] },
+    chargerVoltage: { offset: 0, fields: ['aux_battery_v', 'alternator_v'] }
+};
+// Samples arrive every ~10 s while the gateway is polling the charger.
+const CHARGER_STALE_AFTER_SECONDS = 120;
+// Orange is charger output and purple is alternator input, in every chart.
+const CHARGER_OUTPUT_COLOR = '#fd7e14';
+const CHARGER_INPUT_COLOR = '#6610f2';
 
 // Helper function to trigger glow effect on connection status badge
 function triggerGlowEffect() {
@@ -279,6 +292,9 @@ document.addEventListener('DOMContentLoaded', function() {
         }
         if (latestDeviceAvailability) {
             renderDeviceAvailability(latestDeviceAvailability);
+        }
+        if (latestChargerReading) {
+            renderChargerAge(latestChargerReading);
         }
     }, 30000);
 });
@@ -656,13 +672,14 @@ function getDataRequestUrl() {
 
 function normalizeDataPayload(payload) {
     if (Array.isArray(payload)) {
-        return { records: payload, latestReading: null, meta: {} };
+        return { records: payload, latestReading: null, meta: {}, charger: null };
     }
 
     return {
         records: payload.records || [],
         latestReading: payload.latest_reading || null,
-        meta: payload.meta || {}
+        meta: payload.meta || {},
+        charger: payload.charger || null
     };
 }
 
@@ -717,9 +734,17 @@ function initializeCharts() {
         ...chartConfig,
         data: {
             datasets: [{
-                label: 'Current (A)',
+                label: 'BMS pack current (A)',
                 borderColor: '#28a745',
                 backgroundColor: 'rgba(40,167,69,0.1)',
+                data: []
+            }, {
+                // Dashed: a second instrument, not the BMS measurement.
+                label: 'Charger output (A)',
+                borderColor: CHARGER_OUTPUT_COLOR,
+                backgroundColor: 'rgba(253,126,20,0.1)',
+                borderDash: [6, 4],
+                fill: false,
                 data: []
             }]
         },
@@ -858,6 +883,49 @@ function initializeCharts() {
             }
         }
     });
+
+    charts.chargerPower = new Chart(document.getElementById('chargerPowerChart').getContext('2d'), {
+        ...chartConfig,
+        data: {
+            datasets: [
+                { label: 'To house battery (W)', borderColor: CHARGER_OUTPUT_COLOR, backgroundColor: 'rgba(253,126,20,0.1)', data: [] },
+                // Dashed: input and output differ only by conversion loss, so
+                // a solid line would hide under the output series.
+                { label: 'From alternator (W)', borderColor: CHARGER_INPUT_COLOR, backgroundColor: 'rgba(102,16,242,0.1)', borderDash: [6, 4], data: [] }
+            ]
+        },
+        options: {
+            ...chartConfig.options,
+            scales: {
+                ...chartConfig.options.scales,
+                y: {
+                    ...chartConfig.options.scales.y,
+                    beginAtZero: true,
+                    title: { display: true, text: 'Power (W)' }
+                }
+            }
+        }
+    });
+
+    charts.chargerVoltage = new Chart(document.getElementById('chargerVoltageChart').getContext('2d'), {
+        ...chartConfig,
+        data: {
+            datasets: [
+                { label: 'House battery at charger (V)', borderColor: CHARGER_OUTPUT_COLOR, backgroundColor: 'rgba(253,126,20,0.1)', data: [] },
+                { label: 'Alternator input (V)', borderColor: CHARGER_INPUT_COLOR, backgroundColor: 'rgba(102,16,242,0.1)', data: [] }
+            ]
+        },
+        options: {
+            ...chartConfig.options,
+            scales: {
+                ...chartConfig.options.scales,
+                y: {
+                    ...chartConfig.options.scales.y,
+                    title: { display: true, text: 'Voltage (V)' }
+                }
+            }
+        }
+    });
 }
 
 function applyChartTheme() {
@@ -944,8 +1012,17 @@ function connectWebSocket() {
         const normalized = normalizeDataPayload(payload);
         setLoadingState(false);
         clearFetchStatus();
-        updateChartsWithHistoricalData(normalized.records, normalized.meta);
+        updateChartsWithHistoricalData(normalized.records, normalized.meta, normalized.charger);
         updateCurrentValues(normalized.latestReading);
+        renderCharger(normalized.charger?.latest_reading);
+    });
+
+    socket.on('charger_update', function(payload) {
+        if (currentRangeMode === 'absolute' || !payload?.point) {
+            return;
+        }
+        updateChargerChartsWithNewData(payload.point, payload.meta || {});
+        renderCharger(payload.latest_reading);
     });
 
     socket.on('statistics', function(stats) {
@@ -1047,8 +1124,9 @@ function loadInitialData(sourceModule = 'time') {
             }
             clearFetchStatus();
             const normalized = normalizeDataPayload(payload);
-            updateChartsWithHistoricalData(normalized.records, normalized.meta);
+            updateChartsWithHistoricalData(normalized.records, normalized.meta, normalized.charger);
             updateCurrentValues(normalized.latestReading);
+            renderCharger(normalized.charger?.latest_reading);
         })
         .catch(error => {
             if (error.name === 'AbortError') {
@@ -1279,19 +1357,27 @@ function applyXAxisWindow() {
     });
 }
 
-function updateChartsWithHistoricalData(data, meta = {}) {
+function assignAllChargerChartData(records) {
+    Object.entries(CHARGER_CHART_FIELDS).forEach(([chartKey, spec]) => {
+        spec.fields.forEach((field, index) => {
+            charts[chartKey].data.datasets[spec.offset + index].data =
+                buildDatasetPoints(records, field);
+        });
+    });
+}
+
+function updateChartsWithHistoricalData(data, meta = {}, charger = null) {
     applyXAxisWindow();
 
     if (!data || data.length === 0) {
         clearChartData();
         updateResolutionAndPointInfo(meta);
-        Object.values(charts).forEach(chart => chart.update('none'));
-        return;
+    } else {
+        assignAllChartData(data);
+        updateResolutionAndPointInfo({ ...meta, point_count: data.length });
     }
-
-    assignAllChartData(data);
-
-    updateResolutionAndPointInfo({ ...meta, point_count: data.length });
+    // After the BMS series, since clearChartData() empties every dataset.
+    assignAllChargerChartData(charger?.records || []);
 
     Object.values(charts).forEach(chart => {
         chart.update('none');
@@ -1378,6 +1464,112 @@ function updateChartsWithNewData(data, meta = {}) {
         is_aggregated: Boolean(meta.is_aggregated),
         point_count: pointCount
     });
+}
+
+function updateChargerChartsWithNewData(data, meta = {}) {
+    const timestamp = new Date(data.timestamp * 1000);
+    const replaceLastPoint = Boolean(meta.is_aggregated);
+    Object.entries(CHARGER_CHART_FIELDS).forEach(([chartKey, spec]) => {
+        spec.fields.forEach((field, index) => {
+            pushOrReplace(
+                charts[chartKey].data.datasets[spec.offset + index],
+                { x: timestamp, y: data[field] },
+                replaceLastPoint
+            );
+        });
+    });
+
+    trimAllChartsToWindow(new Date(Date.now() - currentTimeRange * 3600 * 1000));
+
+    const animationDuration = currentTimeRange <= 0.5 ? 0 : 300;
+    Object.keys(CHARGER_CHART_FIELDS).forEach(chartKey => {
+        charts[chartKey].options.animation.duration = animationDuration;
+        charts[chartKey].update('active');
+    });
+}
+
+function formatNumber(value, digits) {
+    return value === null || value === undefined ? '--' : Number(value).toFixed(digits);
+}
+
+function setChargerText(id, text) {
+    document.getElementById(id).textContent = text;
+}
+
+function renderChargerAge(reading) {
+    const badge = document.getElementById('chargerAgeBadge');
+    const sampleText = document.getElementById('chargerLastSample');
+    if (!reading?.timestamp) {
+        badge.hidden = true;
+        sampleText.textContent = '--';
+        return;
+    }
+    const ageSeconds = Math.max(0, Math.floor(Date.now() / 1000 - reading.timestamp));
+    sampleText.textContent =
+        `${new Date(reading.timestamp * 1000).toLocaleString()} (${formatAge(ageSeconds)})`;
+    const stale = ageSeconds > CHARGER_STALE_AFTER_SECONDS;
+    badge.hidden = !stale;
+    badge.textContent = `No data · ${formatAge(ageSeconds)}`;
+    badge.className = 'badge text-bg-warning';
+    badge.title = 'The gateway has not reported a charger sample recently.';
+}
+
+// The card always shows the newest raw charger row, never a bucket average.
+function renderCharger(reading) {
+    latestChargerReading = reading && reading.device_id ? reading : null;
+    const stateBadge = document.getElementById('chargerStateBadge');
+    const faultBadge = document.getElementById('chargerFaultBadge');
+    const faultList = document.getElementById('chargerFaultList');
+    const r = latestChargerReading;
+
+    if (!r) {
+        stateBadge.textContent = 'No charger data';
+        stateBadge.className = 'badge text-bg-secondary';
+        stateBadge.title = '';
+        faultBadge.hidden = true;
+        faultList.hidden = true;
+        ['chargerOutput', 'chargerInput', 'chargerMode', 'chargerIgn', 'chargerTemps',
+            'chargerCurrentLimit', 'chargerDaily', 'chargerTotal']
+            .forEach(id => setChargerText(id, '--'));
+        renderChargerAge(null);
+        return;
+    }
+
+    const charging = r.charging_state !== 0;
+    stateBadge.textContent = r.charging_state_label || 'Unknown state';
+    stateBadge.className = charging ? 'badge text-bg-success' : 'badge text-bg-secondary';
+    stateBadge.title = `Charging status register 0x0120 = ${r.charging_state}`;
+
+    const faults = r.faults || [];
+    faultBadge.hidden = false;
+    faultBadge.textContent = faults.length
+        ? `${faults.length} fault${faults.length === 1 ? '' : 's'}`
+        : 'No faults';
+    faultBadge.className = faults.length ? 'badge text-bg-danger' : 'badge text-bg-success';
+    faultBadge.title = `Fault words 0x0121 = ${r.faults_hi}, 0x0122 = ${r.faults_lo}`;
+    faultList.replaceChildren(...faults.map(name => {
+        const item = document.createElement('li');
+        item.textContent = name;
+        return item;
+    }));
+    faultList.hidden = faults.length === 0;
+
+    setChargerText('chargerOutput',
+        `${formatNumber(r.aux_battery_v, 1)} V · ${formatNumber(r.charge_current_a, 2)} A · ` +
+        `${formatNumber(r.output_power_w, 0)} W`);
+    setChargerText('chargerInput',
+        `${formatNumber(r.alternator_v, 1)} V · ${formatNumber(r.alternator_current_a, 2)} A · ` +
+        `${formatNumber(r.alternator_w, 0)} W`);
+    setChargerText('chargerMode', r.monitor_mode_label || '--');
+    setChargerText('chargerIgn', r.ign ? 'Connected' : 'Disconnected');
+    setChargerText('chargerTemps',
+        `${formatNumber(r.controller_temp_c, 0)} °C / ${formatNumber(r.battery_temp_c, 0)} °C`);
+    setChargerText('chargerCurrentLimit', `${formatNumber(r.current_limit_a, 0)} A`);
+    setChargerText('chargerDaily',
+        `${formatNumber(r.daily_ah, 0)} Ah · ${formatNumber(r.daily_kwh, 3)} kWh`);
+    setChargerText('chargerTotal',
+        `${formatNumber(r.total_ah, 0)} Ah · ${formatNumber(r.total_kwh, 1)} kWh`);
+    renderChargerAge(r);
 }
 
 // Metric cards show the newest raw reading only. They must never be fed a

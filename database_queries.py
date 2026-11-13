@@ -1476,6 +1476,175 @@ def get_latest_point_for_view(
         conn.close()
 
 
+# Charger chart series. output_power_w is derived because register 0x0124
+# (stored as output_w) reads 0 on the RBC40D1U while charging.
+CHARGER_SERIES_SQL = {
+    'aux_battery_v': 'aux_battery_v',
+    'charge_current_a': 'charge_current_a',
+    'output_power_w': 'aux_battery_v * charge_current_a',
+    'alternator_v': 'alternator_v',
+    'alternator_current_a': 'alternator_current_a',
+    'alternator_w': 'alternator_w',
+}
+CHARGER_RAW_SELECT_SQL = ', '.join(
+    ['timestamp'] + [f'{expr} AS {name}' for name, expr in CHARGER_SERIES_SQL.items()]
+)
+CHARGER_AGGREGATE_SELECT_SQL = ', '.join(
+    f'AVG({expr}) AS {name}' for name, expr in CHARGER_SERIES_SQL.items()
+)
+
+
+def _charger_device_clause(device_id: Optional[str], params: List) -> str:
+    if not device_id:
+        return ''
+    params.append(device_id)
+    return ' AND device_id = ?'
+
+
+def get_charger_data_for_view(
+    hours: float = 1,
+    device_id: Optional[str] = None,
+    resolution: str = 'auto',
+    target_points: int = 300,
+    start_ts: Optional[int] = None,
+    end_ts: Optional[int] = None
+) -> Tuple[List[Dict], Dict]:
+    """Get charger chart series for a dashboard view.
+
+    Windows and buckets are resolved exactly as for BMS telemetry, so
+    charger points land on the same x positions as the BMS points they are
+    compared with.
+    """
+    is_absolute = (
+        isinstance(start_ts, int)
+        and isinstance(end_ts, int)
+        and end_ts > start_ts
+    )
+    if not is_absolute:
+        start_ts = None
+        end_ts = None
+    duration_hours = (end_ts - start_ts) / 3600.0 if is_absolute else hours
+    bucket_seconds = resolve_bucket_seconds(duration_hours, resolution, target_points)
+    is_aggregated = should_aggregate_view(duration_hours, resolution, bucket_seconds)
+
+    window_clause, params = _window_clause_and_params(hours, start_ts, end_ts)
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        if is_aggregated:
+            params = [bucket_seconds, bucket_seconds, *params]
+            device_clause = _charger_device_clause(device_id, params)
+            params.append(bucket_seconds)
+            cursor.execute(f"""
+                SELECT
+                    CAST((timestamp / ?) AS INTEGER) * ? AS timestamp,
+                    COUNT(*) AS sample_count,
+                    {CHARGER_AGGREGATE_SELECT_SQL}
+                FROM charger_telemetry
+                WHERE timestamp_valid = 1 AND {window_clause}{device_clause}
+                GROUP BY CAST((timestamp / ?) AS INTEGER)
+                ORDER BY timestamp ASC
+            """, params)
+        else:
+            device_clause = _charger_device_clause(device_id, params)
+            cursor.execute(f"""
+                SELECT {CHARGER_RAW_SELECT_SQL}
+                FROM charger_telemetry
+                WHERE timestamp_valid = 1 AND {window_clause}{device_clause}
+                ORDER BY timestamp ASC
+            """, params)
+        records = [dict(row) for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+    return records, {
+        'bucket_seconds': bucket_seconds,
+        'is_aggregated': is_aggregated,
+        'point_count': len(records),
+    }
+
+
+def get_latest_charger_point_for_view(
+    hours: float = 1,
+    device_id: Optional[str] = None,
+    resolution: str = 'auto',
+    target_points: int = 300
+) -> Optional[Dict]:
+    """Get the newest charger chart point for a live view (raw or bucketed)."""
+    bucket_seconds = resolve_bucket_seconds(hours, resolution, target_points)
+    aggregated = should_aggregate_view(hours, resolution, bucket_seconds)
+    params: List = []
+    device_clause = _charger_device_clause(device_id, params)
+
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT {CHARGER_RAW_SELECT_SQL}
+            FROM charger_telemetry
+            WHERE timestamp_valid = 1{device_clause}
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, params)
+        latest = cursor.fetchone()
+        if not latest:
+            return None
+        if not aggregated:
+            return dict(latest)
+
+        bucket_start = int((latest['timestamp'] // bucket_seconds) * bucket_seconds)
+        params = [bucket_start, bucket_start, bucket_start + bucket_seconds]
+        device_clause = _charger_device_clause(device_id, params)
+        cursor.execute(f"""
+            SELECT ? AS timestamp, COUNT(*) AS sample_count,
+                   {CHARGER_AGGREGATE_SELECT_SQL}
+            FROM charger_telemetry
+            WHERE timestamp_valid = 1
+              AND timestamp >= ? AND timestamp < ?{device_clause}
+        """, params)
+        row = cursor.fetchone()
+        return dict(row) if row and row['sample_count'] else None
+    finally:
+        conn.close()
+
+
+def get_latest_charger_reading(device_id: Optional[str] = None) -> Optional[Dict]:
+    """Get the newest charger row, with derived output power."""
+    params: List = []
+    device_clause = _charger_device_clause(device_id, params)
+    conn = get_db_connection()
+    try:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT *, aux_battery_v * charge_current_a AS output_power_w
+            FROM charger_telemetry
+            WHERE timestamp_valid = 1{device_clause}
+            ORDER BY timestamp DESC
+            LIMIT 1
+        """, params)
+        row = cursor.fetchone()
+        if not row:
+            return None
+        reading = dict(row)
+        reading['ign'] = bool(reading['ign'])
+        reading['timestamp_valid'] = bool(reading['timestamp_valid'])
+        return reading
+    finally:
+        conn.close()
+
+
+def get_latest_charger_record_id() -> Optional[int]:
+    """Get the most recent charger_telemetry row id."""
+    conn = get_db_connection()
+    try:
+        row = conn.execute(
+            "SELECT MAX(id) AS latest_id FROM charger_telemetry"
+        ).fetchone()
+        return row['latest_id'] if row else None
+    finally:
+        conn.close()
+
+
 def get_db_connection():
     """Get database connection"""
     try:

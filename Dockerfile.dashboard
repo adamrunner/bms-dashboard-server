@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY dashboard_server.py .
 COPY database_queries.py .
 COPY soc_estimate.py .
+COPY charger_registers.py .
 COPY bms_schema.sql .
 COPY start_dashboard.py .
 COPY templates/ templates/

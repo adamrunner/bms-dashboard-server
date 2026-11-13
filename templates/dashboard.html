@@ -228,6 +228,67 @@
             </div>
         </div>
 
+        <!-- Renogy DC-DC charger -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card device-status-card" id="chargerCard">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5 class="card-title mb-0">DC-DC Charger</h5>
+                        <div class="d-flex gap-2 flex-wrap justify-content-end">
+                            <span id="chargerStateBadge" class="badge text-bg-secondary">No charger data</span>
+                            <span id="chargerFaultBadge" class="badge text-bg-secondary" hidden></span>
+                            <span id="chargerAgeBadge" class="badge text-bg-secondary" hidden></span>
+                        </div>
+                    </div>
+                    <div class="card-body">
+                        <div class="device-status-grid">
+                            <div>
+                                <div class="device-status-label">To House Battery</div>
+                                <div class="device-status-value" id="chargerOutput">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">From Alternator</div>
+                                <div class="device-status-value" id="chargerInput">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Mode</div>
+                                <div class="device-status-value" id="chargerMode">--</div>
+                            </div>
+                            <div title="Register 0x0126. Reads disconnected during most charging seen so far, so it is not a reliable engine-running signal.">
+                                <div class="device-status-label">IGN Line</div>
+                                <div class="device-status-value" id="chargerIgn">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Controller / Battery Temp</div>
+                                <div class="device-status-value" id="chargerTemps">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Current Limit</div>
+                                <div class="device-status-value" id="chargerCurrentLimit">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Today</div>
+                                <div class="device-status-value" id="chargerDaily">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Lifetime</div>
+                                <div class="device-status-value" id="chargerTotal">--</div>
+                            </div>
+                            <div>
+                                <div class="device-status-label">Last Sample</div>
+                                <div class="device-status-value" id="chargerLastSample">--</div>
+                            </div>
+                        </div>
+                        <ul class="charger-fault-list small text-danger mt-3 mb-0" id="chargerFaultList" hidden></ul>
+                        <div class="small text-muted mt-3">
+                            Output power is house battery voltage &times; charge current. The charger&rsquo;s own
+                            output-power register reads 0 on this model.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
         <!-- Charts -->
         <div class="row">
             <!-- Pack Voltage -->
@@ -248,7 +309,7 @@
             <div class="col-lg-6">
                 <div class="card">
                     <div class="card-header">
-                        <h5 class="card-title mb-0">Pack Current</h5>
+                        <h5 class="card-title mb-0">Pack Current vs Charger Output</h5>
                     </div>
                     <div class="card-body">
                         <div class="chart-container">
@@ -323,6 +384,34 @@
                     <div class="card-body">
                         <div class="chart-container">
                             <canvas id="powerChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charger Power -->
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Charger Power</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="chargerPowerChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Charger Voltages -->
+            <div class="col-lg-6">
+                <div class="card">
+                    <div class="card-header">
+                        <h5 class="card-title mb-0">Charger Voltages</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="chargerVoltageChart"></canvas>
                         </div>
                     </div>
                 </div>
